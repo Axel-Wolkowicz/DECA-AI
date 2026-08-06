@@ -1,0 +1,13 @@
+# Los datasets NO se versionan: viven en el SSD externo (D:\DECA-datasets), fuera del repo.
+# Estas reglas son defensivas por si algún día se crea una carpeta de datos dentro del repo.
+data/
+datasets/
+*.hdf5
+*.h5
+*.dat
+*.zip
+*.parquet
+# venv de IA (cuando se cree)
+.venv/
+venv/
+__pycache__/

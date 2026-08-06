@@ -1,0 +1,16 @@
+# Base (Fase 0-2): lectura HDF5, metadata, resampleo, conversion WFDB->HDF5
+h5py==3.16.0
+numpy==2.5.1
+pandas==3.0.5
+pyarrow==25.0.0
+scipy==1.18.0
+wfdb==4.3.1
+tqdm==4.70.0
+
+# EDA (Fase 1)
+matplotlib==3.11.1
+jupyterlab
+
+# Modelado (Fase 4) - se agrega cuando arranque esa fase:
+# torch (CUDA 12.x)
+# scikit-learn
