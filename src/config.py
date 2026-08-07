@@ -14,6 +14,7 @@ CODE15_EXAMS_CSV = CODE15_DIR / "exams.csv"
 SAMITROP_EXAMS_CSV = SAMITROP_DIR / "exams.csv"
 SAMITROP_HDF5 = SAMITROP_DIR / "exams.hdf5"
 PTBXL_DATABASE_CSV = PTBXL_DIR / "ptbxl_database.csv"
+PTBXL_HDF5 = PTBXL_DIR / "ptbxl.hdf5"
 
 if not DATA_DIR.exists():
     raise FileNotFoundError(
