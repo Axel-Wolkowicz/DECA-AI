@@ -88,6 +88,11 @@ SAMITROP_HDF5 = SAMITROP_DIR / "exams.hdf5"
 PTBXL_DATABASE_CSV = PTBXL_DIR / "ptbxl_database.csv"
 PTBXL_HDF5 = PTBXL_DIR / "ptbxl.hdf5"
 
+# Salida de Fase 2 (src/preprocess.py): señal unificada (N, 2800, 12) a 400 Hz,
+# ya recortada y normalizada, lista para copiar a la maquina de entrenamiento.
+FASE2_HDF5 = DATA_DIR / "fase2_preprocessed.hdf5"
+FASE2_METADATA_PATH = DATA_DIR / "fase2_metadata.parquet"
+
 
 if __name__ == "__main__":
     origen = "DECA_DATA_DIR" if os.environ.get("DECA_DATA_DIR") else "autodeteccion"

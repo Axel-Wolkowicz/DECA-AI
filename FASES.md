@@ -1,6 +1,6 @@
 # IA — Fases del proyecto y dificultades
 
-Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). La Fase 1 tiene mediciones parciales ya hechas y la Fase 2 tiene diseño acordado; la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). Lo próximo es implementar la Fase 2.
+Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). **Fase 1 completa** (las 4 tareas de EDA cubiertas por notebooks reproducibles en `notebooks/`); la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). **Fase 2 en progreso**: diseño corregido y código implementado (`src/split_patients.py`, `src/preprocess.py`), probado en subconjuntos pero **todavía no corrido sobre el corpus completo**. Lo próximo es correr `python src/preprocess.py` sobre los 366.854 registros.
 
 Convención de estado: 🔲 no iniciada · 🟡 en progreso · ✅ completa.
 
@@ -25,13 +25,13 @@ Antes de escribir cualquier línea de modelado hay que poder leer un ECG.
 
 ---
 
-## Fase 1 — Exploración de datos (EDA) 🔲
+## Fase 1 — Exploración de datos (EDA) ✅
 
 **Tareas:**
-- Cargar una muestra de cada dataset y visualizar señales crudas (las 12 derivaciones).
-- Revisar distribución de edades, sexo, frecuencia de muestreo real vs. nominal, duración real de cada registro.
-- Cuantificar el desbalance de clases por dataset (CODE-15% ~2% positivos, SaMi-Trop ~93% positivos).
-- Revisar calidad de señal: ruido, artefactos de movimiento, derivaciones faltantes o corruptas.
+- [x] Cargar una muestra de cada dataset y visualizar señales crudas (las 12 derivaciones). → `notebooks/01_eda_senales.ipynb`.
+- [x] Revisar distribución de edades, sexo, frecuencia de muestreo real vs. nominal, duración real de cada registro. → `notebooks/02_distribuciones.ipynb` (edad/sexo, sobre los 366.854 registros completos) + `notebooks/04_calidad_senal.ipynb` (duración real, sobre muestra).
+- [x] Cuantificar el desbalance de clases por dataset (CODE-15% ~2% positivos, SaMi-Trop 100% positivos por serología — ver nota resuelta más abajo). → `notebooks/03_desbalance_clases.ipynb`.
+- [x] Revisar calidad de señal: ruido, artefactos de movimiento, derivaciones faltantes o corruptas. → `notebooks/04_calidad_senal.ipynb`.
 
 **Dificultades:**
 - **Tres datasets, tres realidades distintas.** No se pueden explorar como si fueran uno solo: CODE-15% es population-based con etiqueta autorreportada, SaMi-Trop es una cohorte de enfermos con etiqueta serológica, PTB-XL es de una región no endémica y sirve como negativo "por presunción" más que por diagnóstico confirmado. Cualquier estadística agregada sin discriminar por origen va a ser engañosa.
@@ -39,15 +39,17 @@ Antes de escribir cualquier línea de modelado hay que poder leer un ECG.
 - **Ruido de señal real.** Estos son ECG de campo (telesalud en zonas rurales para CODE-15%/SaMi-Trop), no señales de laboratorio — esperar artefactos, baseline wander, ruido de línea eléctrica.
 - **Volumen para EDA manual.** Con cientos de miles de registros no se puede inspeccionar todo a ojo; hay que definir criterios automáticos de calidad de señal antes de poder confiar en agregados.
 
-### Mediciones ya hechas (2026-08-08)
+### Mediciones ya hechas (2026-08-08, confirmadas y formalizadas el 2026-08-10)
 
-Adelantadas sobre muestras de 200 registros por dataset, porque condicionan el diseño de la Fase 2:
+Adelantadas sobre muestras de 200 registros por dataset, porque condicionan el diseño de la Fase 2. Reproducidas el 2026-08-10 en `notebooks/04_calidad_senal.ipynb` sobre una muestra nueva de 300 registros/dataset (semilla fija) — números consistentes, diferencias solo por tamaño de muestra:
 
-| | padding de ceros | \|amplitud\| máx. mediana | duración real mediana |
+| | % de registros con padding | \|amplitud\| máx. mediana | duración real mediana |
 |---|---|---|---|
-| CODE-15% | 63,5% de los registros | 4,08 | 7,33 s de 10,24 nominales |
-| SaMi-Trop | 52,5% | 4,33 | 9,82 s de 10,24 |
-| PTB-XL | **0,0%** | **1,82** | 10,00 s de 10,00 |
+| CODE-15% | 63,5% (64,7% en la muestra de confirmación) | 4,08 (4,29) | 7,33 s de 10,24 nominales |
+| SaMi-Trop | 52,5% (48,3%) | 4,33 (4,50) | 9,82 s (10,24 s) de 10,24 |
+| PTB-XL | **0,0%** | **1,82 (1,94)** | 10,00 s de 10,00 |
+
+**Hallazgos nuevos del 2026-08-10** (`notebooks/04_calidad_senal.ipynb`, muestra de 300/dataset): sin NaN en ninguna de las 900 señales muestreadas; derivaciones planas (posible electrodo desconectado) en solo 2 registros de 900 (1 en CODE-15% con 1 derivación plana, 1 en SaMi-Trop con 2) — infrecuente, pero a filtrar explícitamente en Fase 2 en vez de asumir que no existe.
 
 **Anormalidades ECG disponibles como etiqueta en CODE-15%.** `exams.csv` trae, por registro y para los 343.424 con label de Chagas: `1dAVb`, `RBBB`, `LBBB`, `SB`, `ST`, `AF`, `normal_ecg`. Cruzadas contra `chagas`:
 
@@ -65,7 +67,7 @@ Es el hallazgo más importante hasta acá: **RBBB es el BRD del ROADMAP**, uno d
 
 ---
 
-## Fase 2 — Preprocesamiento y unificación 🔲
+## Fase 2 — Preprocesamiento y unificación 🟡
 
 **Tareas:**
 - Resamplear todo a una frecuencia común (400 Hz vs 500 Hz según dataset).
@@ -89,6 +91,30 @@ Ataca de frente el atajo de la fuente medido en la Fase 1:
 - **Z-score por registro y por derivación**, no global: normalizar cada registro contra sí mismo **elimina la diferencia de escala entre datasets**. Cualquier estadístico que sí sea global se calcula solo sobre train.
 - **Split por `patient_id`**, estratificado por dataset de origen y por label.
 - Salida: HDF5 ya normalizado `(N, 2800, 12)`, listo para copiar a la máquina de entrenamiento (no se mueven los 72 GB crudos).
+
+### Corrección e implementación (2026-08-10)
+
+**Corrección al diseño anterior.** La afirmación "7,0 s entra en los tres datasets sin rellenar nada" nunca se había chequeado contra SaMi-Trop, solo contra CODE-15%. Medido con censo completo/muestra grande antes de implementar:
+
+| dataset | mínimo real | % de registros con <7,0s |
+|---|---|---|
+| SaMi-Trop (censo completo) | 3,92 s | **5,27%** (86 de 1.631) |
+| CODE-15% (muestra de 5.000) | 0,00 s | 1,12% (incluye al menos 1 registro **totalmente vacío**, no solo corto) |
+| PTB-XL (censo completo) | 10,00 s | 0% |
+
+**Decisión: esos registros se descartan del dataset, no se rellenan con ceros.** Rellenar reintroduciría, aunque sea en una fracción chica de registros, exactamente el atajo de padding que este diseño existe para eliminar (ver Fase 4: el padding correlaciona con dataset/label). Se pierde 5,27% de los positivos fuertes de SaMi-Trop (quedan ~1.545), un costo aceptado a cambio de no filtrar la señal de padding.
+
+**Ventana centrada, no desde el inicio.** Se recortan los 2.800 muestras del medio de la señal real, no las primeras: en `notebooks/01_eda_senales.ipynb` se observaron transientes/picos justo donde arranca la señal real después del padding, consistentes con el electrodo asentándose — un artefacto de contacto, no señal clínica útil.
+
+**`patient_id` para el split.** Se agregó como columna a `metadata.parquet` (`build_metadata.py`). CODE-15% y PTB-XL lo traen en la fuente (PTB-XL también tiene pacientes repetidos: 2.111 de 18.869). **SaMi-Trop no tiene columna de paciente en `exams.csv`** — se usa `record_id` como proxy, asumiendo 1 examen por paciente (verificado: sin `exam_id` duplicados en los 1.631 registros).
+
+**Split 70/15/15** (no 80/10/10): con solo ~1.631 positivos fuertes en SaMi-Trop (menos aún tras descartar los <7,0s), conviene priorizar un val/test más grande para calibrar el umbral de 95% de sensibilidad (Fase 3) y medir AUC con confianza — el costo en volumen de entrenamiento es marginal porque CODE-15% domina el total sin importar el ratio exacto.
+
+**Split por paciente, sin tratar distinto a quién tiene 1 examen vs. varios.** Agrupar por `patient_id` y mandar todos los exámenes de un paciente al mismo split ya elimina la fuga de información — no hace falta (ni conviene) forzar a los pacientes con exámenes repetidos a ir todos a train, porque eso sesgaría val/test hacia "pacientes de un solo examen" sin ganar nada adicional en fuga. Verificado tras implementar: 0 pacientes con más de un split asignado.
+
+**Implementado:**
+- `src/split_patients.py`: agrupa por `(dataset, patient_id)`, estratifica por `(dataset, label a nivel paciente)`, split 70/15/15 con semilla fija. Verificado sin fuga y con prevalencia de positivos consistente entre splits (~2,2-2,25%).
+- `src/preprocess.py`: recorte de padding → descarte si <7,0s → resampleo (solo PTB-XL) → ventana centrada de 2.800 muestras → z-score por registro/derivación (con guarda contra división por 0 en derivaciones planas). Probado sobre subconjuntos de los 3 datasets: shape `(2800, 12)`, sin NaN, media≈0 y std≈1 por derivación. **Falta correr sobre el corpus completo** (366.854 registros, ~72 GB) — quedó pendiente para la próxima sesión por tiempo, no por diseño. Salida: `D:\DECA-datasets\fase2_preprocessed.hdf5` + `fase2_metadata.parquet` (rutas en `src/config.py`).
 
 ---
 
@@ -222,7 +248,7 @@ El costo de `max` es real pero acotado: ~2 puntos de especificidad a un nivel de
 **Agregado:** incluir un análisis aparte (apéndice del reporte de Fase 5) que mida **cuánto cae el recall al evaluar también contra las etiquetas de autorreporte**. Si la caída es grande, es la evidencia de que separar las evaluaciones no es prolijidad metodológica sino que el autorreporte mete ruido medible. Si es chica, el supuesto de que el autorreporte es "débil" queda debilitado y habría que revisar la ponderación del entrenamiento — sirve en los dos sentidos.
 
 **Dificultades:**
-- **SaMi-Trop: 93% vs 100% positivos, sin resolver.** El ROADMAP indica ~93% positivos para SaMi-Trop, pero el `exams.hdf5`/`exams.csv` descargado (1.631 registros, columnas: `exam_id, age, is_male, normal_ecg, death, timey, nn_predicted_age`) **no trae columna `chagas`** — no hay forma de leer el label por registro desde este archivo. Dos hipótesis sin confirmar: (a) este es ya el subconjunto curado 100% confirmado positivo (1.631 coincide con el extremo bajo del rango 1.631–5.019 que da el ROADMAP "según la fuente"), o (b) falta un archivo de labels adicional que no se descargó y el 93% aplica también acá. **No asumir 100% en `build_metadata.py` hasta confirmar** — por ahora el script lo deja hardcodeado a `True` pero es un supuesto sin validar, marcado explícitamente en el código.
+- ~~**SaMi-Trop: 93% vs 100% positivos, sin resolver.**~~ **Resuelto (2026-08-10):** SaMi-Trop es la cohorte de pacientes con Chagas confirmado por serología, 100% positivo — es *el* dataset de Chagas por serología, no una muestra poblacional con el ~93% que menciona el ROADMAP para "según la fuente". El `exams.hdf5`/`exams.csv` (1.631 registros) no trae columna `chagas` porque no hace falta: todos los registros son positivos por diseño de la cohorte. `build_metadata.py` ya lo tenía hardcodeado a `True`; el hardcodeo queda confirmado, no es un supuesto sin validar.
 - **No hay ground truth directo de los 3 patrones ECG.** Las etiquetas disponibles son "Chagas sí/no" (por serología o autorreporte), no "presenta BRD+HAI sí/no". Esto significa que el modelo aprenderá a predecir la enfermedad de forma indirecta, no los patrones específicos mencionados en el objetivo — hay que decidir si eso es aceptable o si se necesita anotación adicional (posiblemente manual, por cardiólogo) para un subconjunto.
 - **Tensión sensibilidad vs. especificidad.** Optimizar solo para recall puede disparar los falsos positivos a un nivel que vuelva la herramienta inútil en la práctica (saturar el sistema de testeo serológico). Hay que fijar un piso de especificidad aceptable, no solo maximizar sensibilidad.
 

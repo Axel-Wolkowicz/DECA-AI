@@ -3,6 +3,12 @@
 Columnas de salida:
     record_id   - id de registro, unico dentro del dataset de origen
     dataset     - 'code15' | 'samitrop' | 'ptbxl'
+    patient_id  - id de paciente. En SaMi-Trop no existe en la fuente (no hay columna de
+                  paciente en exams.csv); se usa record_id como proxy, asumiendo 1 examen
+                  por paciente (verificado: sin exam_id duplicados). Necesario para el
+                  split de Fase 2 (por paciente, no por examen, para no filtrar el mismo
+                  paciente entre train/val/test: code15 tiene 66.929 pacientes con mas de
+                  un examen, ptbxl tiene 2.111).
     source_file - archivo HDF5 (o carpeta WFDB) donde vive la señal
     row_index   - posicion de la fila dentro de source_file (indexa tracings[row_index])
     edad
@@ -66,6 +72,7 @@ def build_code15():
     return pd.DataFrame({
         "record_id": df["exam_id"].astype(str),
         "dataset": "code15",
+        "patient_id": df["patient_id"].astype(str),
         "source_file": df["trace_file"],
         "row_index": df["row_index"],
         "edad": df["age"],
@@ -91,13 +98,15 @@ def build_samitrop():
     return pd.DataFrame({
         "record_id": exams["exam_id"].astype(str),
         "dataset": "samitrop",
+        # sin patient_id en la fuente; proxy = record_id (ver docstring del modulo)
+        "patient_id": exams["exam_id"].astype(str),
         "source_file": "exams.hdf5",
         "row_index": np.arange(n_tracings),
         "edad": exams["age"],
         "sexo": np.where(exams["is_male"], "M", "F"),
         "frecuencia": 400,  # ver ROADMAP: SaMi-Trop nativo a 400 Hz
         "duracion": 4096 / 400,
-        "chagas_label": True,  # cohorte de pacientes con Chagas (serologia)
+        "chagas_label": True,  # cohorte de Chagas confirmado por serologia, 100% positivo (confirmado 2026-08-10)
         "confianza": "strong",
     })
 
@@ -130,6 +139,7 @@ def build_ptbxl():
     return pd.DataFrame({
         "record_id": db["ecg_id"].astype(str),
         "dataset": "ptbxl",
+        "patient_id": db["patient_id"].astype(str),
         # El HDF5 consolidado, igual que code15/samitrop. NO filename_hr: esas rutas
         # apuntan a records500/, que se borro despues de convertir.
         "source_file": PTBXL_HDF5.name,
