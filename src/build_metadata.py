@@ -24,6 +24,7 @@ from config import (
     CODE15_LABELS_CSV,
     METADATA_PATH,
     PTBXL_DATABASE_CSV,
+    PTBXL_HDF5,
     SAMITROP_EXAMS_CSV,
     SAMITROP_HDF5,
 )
@@ -37,7 +38,11 @@ def build_code15():
     labels = pd.read_csv(CODE15_LABELS_CSV)[["exam_id", "chagas"]]
 
     # index exam_id -> row_index dentro de cada exams_part{n}.hdf5 (solo se lee el
-    # dataset 'exam_id', no las señales -> rapido)
+    # dataset 'exam_id', no las señales -> rapido).
+    # Ojo: cada parte trae una fila de padding al final, con exam_id=0 y la señal toda
+    # en ceros (por eso son 20.001 filas y no 20.000). Vienen asi desde Zenodo. Aca se
+    # filtran solas porque exam_id=0 no existe en exams.csv y el merge no lo matchea,
+    # pero cualquier recorrido directo de 'tracings' las va a encontrar.
     row_index = {}
     for n in range(CODE15_N_PARTS):
         path = CODE15_DIR / f"exams_part{n}.hdf5"
@@ -98,16 +103,37 @@ def build_samitrop():
 
 
 def build_ptbxl():
-    if not PTBXL_DATABASE_CSV.exists():
-        print(f"PTB-XL: no encontrado {PTBXL_DATABASE_CSV} todavia (falta descargar/convertir) -> se omite")
-        return None
+    for path in (PTBXL_DATABASE_CSV, PTBXL_HDF5):
+        if not path.exists():
+            print(f"PTB-XL: no encontrado {path} todavia (falta descargar/convertir) -> se omite")
+            return None
 
     db = pd.read_csv(PTBXL_DATABASE_CSV)
+
+    # convert_ptbxl.py escribe tracings[i] recorriendo db en orden, asi que row_index es
+    # la posicion en el CSV. No se asume: se verifica contra el exam_id guardado en el
+    # HDF5. Si el orden no coincidiera, cada señal quedaria pegada a la demografia y al
+    # label de otro paciente, sin que nada falle.
+    with h5py.File(PTBXL_HDF5, "r") as f:
+        exam_id = f["exam_id"][:]
+    if len(exam_id) != len(db):
+        raise ValueError(
+            f"PTB-XL: ptbxl.hdf5 tiene {len(exam_id)} registros pero "
+            f"ptbxl_database.csv tiene {len(db)}. Regenerar el HDF5 con convert_ptbxl.py."
+        )
+    if not np.array_equal(exam_id, db["ecg_id"].to_numpy(dtype=exam_id.dtype)):
+        raise ValueError(
+            "PTB-XL: el orden de exam_id en ptbxl.hdf5 no coincide con ecg_id en "
+            "ptbxl_database.csv. No se puede mapear row_index por posicion."
+        )
+
     return pd.DataFrame({
         "record_id": db["ecg_id"].astype(str),
         "dataset": "ptbxl",
-        "source_file": db["filename_hr"],
-        "row_index": 0,  # PTB-XL se convierte a un hdf5 por registro o consolidado; TODO al convertir
+        # El HDF5 consolidado, igual que code15/samitrop. NO filename_hr: esas rutas
+        # apuntan a records500/, que se borro despues de convertir.
+        "source_file": PTBXL_HDF5.name,
+        "row_index": np.arange(len(db)),
         "edad": db["age"],
         "sexo": np.where(db["sex"] == 0, "M", "F"),
         "frecuencia": 500,

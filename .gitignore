@@ -1,4 +1,5 @@
-# Los datasets NO se versionan: viven en el SSD externo (D:\DECA-datasets), fuera del repo.
+# Los datasets NO se versionan: viven en el SSD externo, fuera del repo. La ruta la
+# resuelve src/config.py (DECA_DATA_DIR o autodeteccion); no se fija en ningun lado.
 # Estas reglas son defensivas por si algún día se crea una carpeta de datos dentro del repo.
 data/
 datasets/
