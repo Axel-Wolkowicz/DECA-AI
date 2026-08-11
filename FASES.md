@@ -1,6 +1,6 @@
 # IA — Fases del proyecto y dificultades
 
-Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). **Fase 1 completa** (las 4 tareas de EDA cubiertas por notebooks reproducibles en `notebooks/`); la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). **Fase 2 en progreso**: diseño corregido y código implementado (`src/split_patients.py`, `src/preprocess.py`), probado en subconjuntos pero **todavía no corrido sobre el corpus completo**. Lo próximo es correr `python src/preprocess.py` sobre los 366.854 registros.
+Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). **Fase 1 completa** (las 4 tareas de EDA cubiertas por notebooks reproducibles en `notebooks/`); la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). **Fase 2 completa (2026-08-10)**: diseño corregido y código implementado (`src/split_patients.py`, `src/preprocess.py`), corrido sobre el corpus completo: 362.363 registros preprocesados en `fase2_preprocessed.hdf5`, con el split por paciente verificado sin fuga. Lo próximo es la **Fase 4** (modelado).
 
 Convención de estado: 🔲 no iniciada · 🟡 en progreso · ✅ completa.
 
@@ -67,7 +67,7 @@ Es el hallazgo más importante hasta acá: **RBBB es el BRD del ROADMAP**, uno d
 
 ---
 
-## Fase 2 — Preprocesamiento y unificación 🟡
+## Fase 2 — Preprocesamiento y unificación ✅
 
 **Tareas:**
 - Resamplear todo a una frecuencia común (400 Hz vs 500 Hz según dataset).
@@ -114,7 +114,42 @@ Ataca de frente el atajo de la fuente medido en la Fase 1:
 
 **Implementado:**
 - `src/split_patients.py`: agrupa por `(dataset, patient_id)`, estratifica por `(dataset, label a nivel paciente)`, split 70/15/15 con semilla fija. Verificado sin fuga y con prevalencia de positivos consistente entre splits (~2,2-2,25%).
-- `src/preprocess.py`: recorte de padding → descarte si <7,0s → resampleo (solo PTB-XL) → ventana centrada de 2.800 muestras → z-score por registro/derivación (con guarda contra división por 0 en derivaciones planas). Probado sobre subconjuntos de los 3 datasets: shape `(2800, 12)`, sin NaN, media≈0 y std≈1 por derivación. **Falta correr sobre el corpus completo** (366.854 registros, ~72 GB) — quedó pendiente para la próxima sesión por tiempo, no por diseño. Salida: `D:\DECA-datasets\fase2_preprocessed.hdf5` + `fase2_metadata.parquet` (rutas en `src/config.py`).
+- `src/preprocess.py`: recorte de padding → descarte si <7,0s → descarte si hay valores no finitos → resampleo (solo PTB-XL) → ventana centrada de 2.800 muestras → z-score por registro/derivación (con guarda contra división por 0 en derivaciones planas). Salida: `D:\DECA-datasets\fase2_preprocessed.hdf5` + `fase2_metadata.parquet` (rutas en `src/config.py`).
+- `src/verify_preprocessed.py`: barre el HDF5 de salida buscando ventanas con valores no finitos y las cruza contra el metadata, distinguiendo las **referenciadas** (llegan al entrenamiento) de las **huérfanas** (están en el HDF5 pero ningún registro del metadata las nombra — inofensivas). Sin argumentos solo reporta y sale con código 1 si hay problemas; con `--fix` reescribe el parquet sin esas filas, con backup previo. Correrlo después de cada corrida de `preprocess.py` y antes de copiar el HDF5 a la máquina de entrenamiento. Barrido completo ≈20 min sobre el SSD externo.
+
+### Corrida sobre el corpus completo (2026-08-10) — Fase 2 CERRADA
+
+Corrida completa: **55 min 40 s** para los 366.854 registros (~130 registros/s). Salida **48,7 GB**.
+
+**362.363 registros** quedaron en el dataset final. Descartes:
+
+| dataset | <7,0 s de señal real | % del dataset | corruptos |
+|---|---|---|---|
+| code15 | 4.404 | 1,27% | 1 |
+| samitrop | 86 | **5,27%** | 0 |
+| ptbxl | 0 | 0% | 0 |
+
+Los 86 de SaMi-Trop coinciden exactamente con el censo completo previo: el descarte se comportó como se había medido.
+
+**Split final, verificado sin fuga y con positivos parejos:**
+
+| split | code15 | ptbxl | samitrop | % positivos |
+|---|---|---|---|---|
+| train | 236.944 | 15.286 | 1.083 | 2,23% |
+| val | 51.371 | 3.245 | 230 | 2,25% |
+| test | 50.704 | 3.268 | 232 | 2,22% |
+
+**Hallazgo nuevo: hay corrupción en los archivos de origen.** La primera corrida tiró `RuntimeWarning: overflow` de NumPy. Barrido completo de los 48,7 GB buscando valores no finitos: **1 registro de 362.364 (0,0003%)**, el `record_id` **2858700** (`code15/exams_part2.hdf5`, fila 14712, split train, label negativo). El archivo crudo trae **23 celdas ya en NaN** y **1.544 muestras de magnitud ~1e38** mezcladas con señal normal de ~0,03 mV. No lo generó el pipeline: 10 de las 12 derivaciones ya venían con NaN de fábrica; en las otras 2, los 1e38 desbordaron float32 al elevar al cuadrado para el desvío (el cuadrado desborda a partir de ~1e19), dando `inf`, y después `inf − inf` → `NaN`.
+
+**Por qué importa aunque sea 1 en 362.364:** un solo NaN en un lote de entrenamiento vuelve NaN la pérdida, después los gradientes y después *todos* los pesos de la red — y ya no se recupera, la red devuelve NaN para cualquier entrada. El síntoma en Fase 4 sería una pérdida que explota sin causa aparente.
+
+**Resuelto así:** `procesar_registro()` ahora descarta el registro si `np.isfinite()` falla sobre la señal real. El chequeo va **antes del resampleo** a propósito: `resample_poly` es una convolución, así que un NaN fuera de la ventana se esparciría hacia adentro. La función pasó a devolver `(ventana, motivo)` para poder contar los dos tipos de descarte por separado. No se volvió a correr el pipeline entero (56 min por 1 registro): se filtró esa fila de `fase2_metadata.parquet`, que es lo que lee el entrenamiento — la fila basura sigue en el HDF5 pero ninguna fila del metadata la referencia. Backup del metadata sin filtrar en `fase2_metadata_sin_filtrar.parquet`.
+
+Ese filtrado se hizo a mano una vez y por eso no era reproducible: si se regenera el parquet, el filtro se pierde. Desde el 2026-08-11 lo reemplaza `src/verify_preprocessed.py --fix`, que no hardcodea el `record_id` 2858700 sino que vuelve a hacer el barrido — encuentre lo que encuentre. Es el mismo chequeo que ya está dentro de `preprocess.py`, pero aplicado del otro lado: allá se valida lo que entra desde los archivos crudos, acá lo que quedó escrito en la salida.
+
+**Verificado el 2026-08-11** con un barrido completo e independiente de los 362.364 registros (21 min): **1 fila con valores no finitos, huérfana, 0 referenciadas por el metadata**. Confirma las dos cosas que el arreglo manual no había demostrado — que esa fila era la única del corpus, y que el parquet que lee el entrenamiento no la nombra. El dataset de Fase 2 queda avalado para entrenar.
+
+**Pendiente menor para Fase 4:** el HDF5 está en float32 (48,7 GB). Pasarlo a float16 lo deja en ~24 GB, seguro *porque* ya está z-scoreado (los valores quedan en un rango chico alrededor de 0). Relevante solo al momento de copiarlo a la máquina de entrenamiento; no cambia nada del diseño.
 
 ---
 
