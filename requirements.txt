@@ -11,6 +11,10 @@ tqdm==4.70.0
 matplotlib==3.11.1
 jupyterlab
 
-# Modelado (Fase 4) - se agrega cuando arranque esa fase:
-# torch (CUDA 12.x)
-# scikit-learn
+# Modelado (Fase 4)
+# torch se instala desde el indice de PyTorch, no desde PyPI, porque la rueda de PyPI
+# viene sin CUDA. Para GPU NVIDIA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+# (ajustar cu126 a la version de CUDA del driver; sin GPU, pip install torch a secas).
+torch==2.13.0
+scikit-learn==1.9.0

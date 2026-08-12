@@ -1,6 +1,6 @@
 # IA — Fases del proyecto y dificultades
 
-Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). **Fase 1 completa** (las 4 tareas de EDA cubiertas por notebooks reproducibles en `notebooks/`); la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). **Fase 2 completa (2026-08-10)**: diseño corregido y código implementado (`src/split_patients.py`, `src/preprocess.py`), corrido sobre el corpus completo: 362.363 registros preprocesados en `fase2_preprocessed.hdf5`, con el split por paciente verificado sin fuga. Lo próximo es la **Fase 4** (modelado).
+Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). **Fase 1 completa** (las 4 tareas de EDA cubiertas por notebooks reproducibles en `notebooks/`); la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). **Fase 2 completa (2026-08-10)**: diseño corregido y código implementado (`src/split_patients.py`, `src/preprocess.py`), corrido sobre el corpus completo: 362.363 registros preprocesados en `fase2_preprocessed.hdf5`, con el split por paciente verificado sin fuga. **Fase 4 en progreso (arrancada 2026-08-12)**: pipeline de entrenamiento implementado y validado de punta a punta (`src/dataset.py`, `src/model.py`, `src/evaluar.py`, `src/train.py`), corre en Windows y Linux; primera corrida real de 1 época sobre el dataset completo dio AUC 0,80 en la arena de go/no-go, con el diagnóstico de atajo de fuente en la dirección correcta. Falta correr más épocas y las ablaciones antes de llegar al criterio de despliegue.
 
 Convención de estado: 🔲 no iniciada · 🟡 en progreso · ✅ completa.
 
@@ -332,6 +332,89 @@ Fase 3 pedía "evaluar solo contra etiqueta fuerte (serología)". No es computab
 - **Diagnóstico de atajo (no es performance)**: AUC pooled entre todos los datasets menos AUC de arena A. Ese delta es la magnitud del atajo de fuente en las unidades del go/no-go.
 
 Umbrales de operación (bajo = 95% sensibilidad, alto = PPV≥30%) se calibran **siempre en validación, arena A, nunca en test**.
+
+### Implementación (2026-08-12)
+
+Cuatro módulos nuevos, todos corriendo sobre la salida de Fase 2 sin tocarla:
+
+- **`src/dataset.py`** — `ECGDataset` de PyTorch sobre `fase2_preprocessed.hdf5`, más el merge del label de RBBB y los pesos por confianza. Excluye PTB-XL del train por default (`--con-ptbxl` para la ablación inversa).
+- **`src/model.py`** — `ResNet1D`, CNN 1D residual con dos cabezas (Chagas + RBBB) sobre el mismo cuerpo.
+- **`src/evaluar.py`** — las 4 arenas + calibración de umbrales, a nivel paciente. Separado de `train.py` a propósito: la Fase 5 lo reusa tal cual.
+- **`src/train.py`** — loop de entrenamiento con loss enmascarada, `pos_weight`, AMP, checkpoints.
+
+**Bug encontrado antes de que llegara al modelo: los `record_id` no son únicos entre datasets.** El primer merge del label de RBBB se hizo por `record_id` contra `code15/exams.csv`, y le pegó label de RBBB ajeno a **3.100 registros de PTB-XL** — el `record_id` de PTB-XL es su `ecg_id` (1..21.837) y esos mismos números existen como `exam_id` en CODE-15%. Nada falla cuando pasa: el registro queda con máscara 1 y un label inventado, y encima justo en la arena C, que es la que mide generalización. La clave del merge ahora lleva `dataset` además de `record_id`. Vale como advertencia general: **`record_id` solo es único dentro de su dataset** (ya está documentado así en `build_metadata.py`, pero es fácil de olvidar al hacer un join).
+
+**La arquitectura, y por qué no es exactamente la del paper.** Se calca ResNet1D de Ribeiro et al. 2020 (*Nature Communications*), que es la red entrenada sobre CODE — el dataset de donde sale el 93% de nuestro train: stem convolucional + 4 bloques residuales que dividen el largo por 4 y suben canales (128, 196, 256, 320), flatten, cabeza lineal. ~6,4M de parámetros.
+
+La diferencia forzada es el largo de entrada: **2.800 muestras, no 4.096**, porque esa es la ventana de 7,0 s de la Fase 2. Como 2.800 no es múltiplo de 4⁴, los largos por bloque quedan `2800 → 700 → 175 → 43 → 10`, y ahí la rama principal y el atajo residual dejan de coincidir salvo que redondeen igual. Medido: con el **kernel 17 del paper** en la convolución con stride, el tercer bloque da **44 contra 43** del atajo y el forward revienta. Con **kernel 16 / padding 6** la convolución da exactamente `floor(L/4)`, el mismo largo que `MaxPool1d(4)`, y coincide en los cuatro bloques. No es un detalle cosmético: es la razón por la que no se puede copiar el paper y pegarlo.
+
+**Ponderación por confianza: `peso_strong = 3,0`.** La decisión 4 de Fase 3 pide entrenar con las tres fuentes ponderadas, sin fijar cuánto. El primer instinto —dejarlo en 1,0 porque SaMi-Trop es apenas 0,45% de los registros de train y subirle el peso equivaldría a sobremuestrearlo— **está mal planteado, y medirlo lo muestra**: como *todos* los registros de SaMi-Trop son positivos, `pos_weight` ya le corrige el submuestreo, y con peso 1,0 ya se lleva el **19,1%** del gradiente de la clase positiva. El eje que `peso_strong` mueve es otro distinto: cuánto vale una etiqueta serológica contra una autorreportada.
+
+Medido sobre el train real (238.027 registros: 4.574 positivos autorreportados + 1.083 serológicos):
+
+| peso_strong | pos_weight | masa+ de SaMi-Trop | exposición efectiva |
+|---|---|---|---|
+| 1,0 | 41,1 | 19,1% | 41× |
+| 2,0 | 34,5 | 32,1% | 69× |
+| **3,0** | **29,7** | **41,5%** | **89×** |
+| 5,0 | 23,3 | 54,2% | 116× |
+| 20,0 | 8,9 | 82,6% | 177× |
+
+("masa+" = qué fracción del gradiente de la clase positiva aportan los 1.083 registros de SaMi-Trop; "exposición efectiva" = cuánto pesa uno de ellos contra un negativo de CODE-15%.)
+
+**Se elige 3,0**: deja a la serología como co-protagonista de la señal positiva sin dominarla. De 5,0 para arriba, 1.083 grabaciones aportan más de la mitad de todo lo que el modelo aprende sobre "positivo", y *eso* sí es memorizar la cohorte — el riesgo por el que se descartó el oversampling. **Efecto lateral a tener presente:** subir `peso_strong` baja `pos_weight` (41 → 29,7), o sea que de paso les baja el peso a los positivos de CODE-15%.
+
+Es la **primera ablación a correr** (`--peso-strong`), y es barata de resolver empíricamente porque la arena A es CODE-15% sola: es inmune a este cambio y hace de juez honesto.
+
+**Qué se elige como mejor checkpoint: AUPRC de arena A en validación, no la loss.** La loss mezcla las dos tareas y está dominada por el desbalance; la arena A es la que decide el go/no-go.
+
+### Portabilidad a Linux (2026-08-12)
+
+El armado del dataset (Fases 0-2) corre en la notebook con Windows, pero **el entrenamiento corre en la máquina con la RTX 4090, que tiene Ubuntu**, con el mismo SSD enchufado. Tres cosas que había que arreglar para eso, ninguna visible desde Windows:
+
+- **Autodetección del SSD.** `config.py` buscaba la carpeta de datos solo en la raíz de cada punto de montaje (`/media/DECA-datasets`), pero Ubuntu automonta los medios externos en `/media/<usuario>/<etiqueta>/`, o sea dos niveles más abajo. Ahora la búsqueda baja hasta 2 niveles bajo cada raíz (`/media`, `/run/media`, `/mnt`, `/Volumes`, `/data`, `$HOME`) y en cada candidata prueba las dos formas: que el montaje *contenga* la carpeta y que el montaje *sea* la carpeta. Verificado sobre 7 layouts (automount de Ubuntu, de Fedora/Arch, montaje manual, copia en el home, minúsculas, y uno demasiado profundo que debe fallar): 7/7.
+- **Bloqueo de archivos de HDF5.** En Linux, HDF5 pide un lock al abrir y sobre exFAT —que es como está formateado el SSD— eso falla con `unable to lock file` aun en solo lectura y con un solo proceso. En Windows no pasa, así que el síntoma habría aparecido recién al mover el entrenamiento. El `ECGDataset` abre con `locking=False`, que es seguro porque nadie escribe el archivo mientras se entrena.
+- **La rueda de torch con CUDA no viene de PyPI.** `pip install torch` a secas instala la versión sin CUDA. Hay que usar el índice de PyTorch (ver `requirements.txt`).
+
+No hace falta convertir nada del armado del dataset: con el SSD conectado, `train.py` lee `code15/exams.csv` para el label de RBBB igual que acá.
+
+Se agregó [SETUP.md](SETUP.md): instructivo de puesta en marcha desde cero para una PC nueva, con los dos escenarios (solo entrenar / rehacer el dataset), Windows y Linux, y una sección de problemas conocidos con el síntoma exacto y el comando que lo arregla.
+
+### Corrida de humo, primer bug post-implementación, y primera corrida real (2026-08-12)
+
+**Corrida de humo (`--limit-train 500 --epocas 1`): pasó.** Cargó datos, corrió forward/backward sin NaN, calibró umbrales sobre las 4 arenas sin explotar (incluido el caso límite de banda alta sin umbral alcanzable, que devuelve PPV `nan` en vez de romper), y escribió el checkpoint. Confirmó además, de paso, que `num_workers>0` no cuelga en Windows con este dataset.
+
+**Bug real, chico, atrapado por el propio warning de PyTorch.** La corrida de humo tiró:
+```
+UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+```
+En `entrenar_epoca()` (`src/train.py`), `suma_chagas += float(l_chagas)` convertía a escalar un tensor que todavía requería gradiente, después de `backward()` pero sin haberlo desprendido del grafo explícitamente. No cambiaba el resultado numérico, pero es la clase de descuido que en un loop de miles de batches puede retener memoria de más sin motivo. Arreglado con `.detach().item()` en las dos acumulaciones (chagas y RBBB); la corrida de humo repetida después del fix salió limpia, sin warnings.
+
+**Benchmark de throughput, antes de comprometerse a un número de épocas.** Sobre la RTX 3500 Ada Generation (laptop, 12 GB): con `batch=128` el train converge a **~7,4-8 it/s** en régimen estable (los primeros 1-2 batches tardan 15-20s por el warmup de cuDNN/CUDA, después cae a <150ms/batch). Con 1.860 batches de train (238.027 registros) y 429 de val (54.846), eso da **una época completa del dataset entero en ~5 minutos** — mucho más rápido de lo previsto en el plan original (~2h la corrida completa de 30 épocas se estimaba antes de medir; a este ritmo son ~2,5h para 30 épocas, pero cada época individual ya es barata de inspeccionar).
+
+**Primera corrida real: 1 época, dataset completo (238.027 train / 54.846 val), batch 128, 5,2 min:**
+
+| métrica | valor |
+|---|---|
+| loss chagas / rbbb | 1,2383 / 0,3604 |
+| **Arena A (code15)** — AUC / AUPRC | **0,8023 / 0,1362** |
+| banda media (sens 95%) | especificidad 32,0%, PPV 2,7%, deriva 68,6% |
+| banda alta (PPV≥30%) | sensibilidad 9,3%, PPV 30,2%, deriva 0,6% |
+| Arena B (samitrop) — recall | 75,2% (umbral bajo) / 4,3% (umbral alto) |
+| Arena C (ptbxl) — especificidad | 21,8% (umbral bajo) / 99,4% (umbral alto) |
+| Arena D (serológica ampliada) — AUC / AUPRC | 0,6385 / 0,0342 |
+| cabeza RBBB — AUPRC | 0,7516 |
+| diagnóstico de atajo (delta pooled vs. A) | **−0,0450** |
+
+**Lectura, con la misma cautela con la que se lee cualquier resultado de época 1:**
+
+- **AUC 0,80 en arena A tras una sola época es una señal fuerte de que el modelo está aprendiendo algo real**, no ruido — muy por debajo del umbral de go/no-go (0,93 fijado en Fase 3), pero el punto de comparación correcto es la trayectoria en las próximas épocas, no el criterio final todavía.
+- **El delta del atajo de fuente dio negativo (−0,045)**: el AUC agrupando los 3 datasets es *menor* que el de arena A sola. Es la dirección correcta — si el modelo estuviera usando la pista de origen (ver "Tercera pista de fuente" más arriba) para inflar la métrica, el pooled saldría *más alto* que A, no más bajo. Primera evidencia de que la exclusión de PTB-XL del train y el resto del diseño anti-atajo están funcionando, aunque con una sola época no alcanza para descartarlo del todo.
+- **La cabeza de RBBB (AUPRC 0,75) ya rinde muy por encima de la de Chagas.** Coherente con lo esperado: 9.457 positivos densos y bien anotados contra ~2% de prevalencia de Chagas, y RBBB es morfológicamente más directo de leer que "Chagas" en general (que es una inferencia indirecta, per Fase 3).
+- **Arena C (PTB-XL, nunca vista en entrenamiento) da 99,4% de especificidad en la banda alta** desde la primera época — buena señal temprana de generalización cruzada de población, que es justamente lo que esta arena existe para medir.
+- Las bandas de operación (68,6% de derivación en la media, 9,3% de sensibilidad en la alta) todavía están lejos de ser útiles clínicamente — esperable con 1 época; los umbrales se recalibran solos en cada época a medida que la discriminación mejora.
+
+**Pendiente inmediato:** correr más épocas (estimado ~5 min/época a este throughput) para ver si arena A converge cerca del umbral de despliegue, y correr la ablación de `--peso-strong` (1,0 vs. 3,0 vs. 5,0) una vez que haya una corrida de varias épocas de referencia.
 
 ---
 
