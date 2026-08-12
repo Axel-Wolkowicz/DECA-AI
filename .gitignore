@@ -12,3 +12,4 @@ datasets/
 .venv/
 venv/
 __pycache__/
+CLAUDE.md

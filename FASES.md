@@ -282,6 +282,8 @@ El costo de `max` es real pero acotado: ~2 puntos de especificidad a un nivel de
 
 **Agregado:** incluir un análisis aparte (apéndice del reporte de Fase 5) que mida **cuánto cae el recall al evaluar también contra las etiquetas de autorreporte**. Si la caída es grande, es la evidencia de que separar las evaluaciones no es prolijidad metodológica sino que el autorreporte mete ruido medible. Si es chica, el supuesto de que el autorreporte es "débil" queda debilitado y habría que revisar la ponderación del entrenamiento — sirve en los dos sentidos.
 
+**Enmienda a la decisión 4 (2026-08-12, ver detalle en Fase 4):** "evaluar solo contra etiqueta fuerte" no es computable tal cual está escrito — los 1.545 registros `strong` (SaMi-Trop) son 100% positivos, y sobre una sola clase no existe AUC, AUPRC, especificidad ni PPV, solo recall. El punto de operación y el go/no-go de más arriba (que sí necesitan las dos clases) se calculan sobre **CODE-15% sola** en su lugar, y la serología entra por dos vías separadas y explícitas: recall puro sobre SaMi-Trop, y un par artificial SaMi-Trop(+) vs. CODE-15%(−) que resulta válido porque esas dos fuentes son difíciles de distinguir entre sí (AUC 0,598, ver Fase 4). El detalle completo, con el argumento de por qué CODE-15% es la arena correcta, está en Fase 4.
+
 **Dificultades:**
 - ~~**SaMi-Trop: 93% vs 100% positivos, sin resolver.**~~ **Resuelto (2026-08-10):** SaMi-Trop es la cohorte de pacientes con Chagas confirmado por serología, 100% positivo — es *el* dataset de Chagas por serología, no una muestra poblacional con el ~93% que menciona el ROADMAP para "según la fuente". El `exams.hdf5`/`exams.csv` (1.631 registros) no trae columna `chagas` porque no hace falta: todos los registros son positivos por diseño de la cohorte. `build_metadata.py` ya lo tenía hardcodeado a `True`; el hardcodeo queda confirmado, no es un supuesto sin validar.
 - **No hay ground truth directo de los 3 patrones ECG.** Las etiquetas disponibles son "Chagas sí/no" (por serología o autorreporte), no "presenta BRD+HAI sí/no". Esto significa que el modelo aprenderá a predecir la enfermedad de forma indirecta, no los patrones específicos mencionados en el objetivo — hay que decidir si eso es aceptable o si se necesita anotación adicional (posiblemente manual, por cardiólogo) para un subconjunto.
@@ -289,10 +291,10 @@ El costo de `max` es real pero acotado: ~2 puntos de especificidad a un nivel de
 
 ---
 
-## Fase 4 — Modelado (baseline → iteración) 🔲
+## Fase 4 — Modelado (baseline → iteración) 🟡
 
 **Tareas:**
-- Definir enfoque: señal cruda (deep learning, ej. CNN/RNN sobre las 12 derivaciones) vs. features clásicas de ECG (intervalos, morfología de onda) + modelo clásico.
+- Definir enfoque: señal cruda (deep learning, ej. CNN/RNN sobre las 12 derivaciones) vs. features clásicas de ECG (intervalos, morfología de onda) + modelo clásico. **Decidido (2026-08-12): señal cruda**, CNN 1D estilo ResNet1D (Ribeiro et al., la red de referencia para este dataset exacto), multi-tarea Chagas + RBBB con loss enmascarada, tal como definió la Fase 3.
 - Levantar un baseline simple primero (aunque sea débil) antes de ir a arquitecturas complejas.
 - Iterar arquitectura/hiperparámetros con validación cruzada respetando los splits por dataset definidos en la Fase 2.
 
@@ -300,6 +302,36 @@ El costo de `max` es real pero acotado: ~2 puntos de especificidad a un nivel de
 - **Desbalance extremo de clases** (2% positivos en el dataset más grande) — requiere técnicas específicas (pesos de clase, resampling, focal loss) y complica la elección de umbral de decisión.
 - **Recursos de cómputo.** Entrenar sobre cientos de miles de señales de 12 derivaciones no es liviano; hay que dimensionar si se necesita GPU y de dónde sale.
 - **Riesgo de overfitting a la fuente del dato, no a la enfermedad.** Si el modelo aprende a distinguir "viene de SaMi-Trop" vs. "viene de PTB-XL" (por diferencias de equipo, región, calidad de señal) en vez de patrones clínicos reales, va a tener buen desempeño en test pero fallar en producción con datos nuevos. **Cuantificado el 2026-08-08 y peor de lo que suena:** como SaMi-Trop es 100% positivo y PTB-XL 100% negativo, *saber de qué dataset viene un registro equivale a saber la etiqueta*, y las señales delatan su origen con una regla de dos líneas (ver tabla en Fase 1: PTB-XL no tiene padding en ningún registro y vive en otra escala de amplitud). El preprocesado de la Fase 2 está diseñado para borrar las dos pistas, pero **toda métrica sospechosamente buena se audita contra esto primero**.
+
+### Tercera pista de fuente encontrada, y por qué no se filtra (2026-08-12)
+
+Antes de escribir código de entrenamiento se midió si las dos pistas de la Fase 2 (padding, escala de amplitud) eran las únicas. **No lo eran.** Sobre 200 registros por dataset del HDF5 ya preprocesado (z-scoreado), la fracción de energía en la banda 40-100 Hz por sí sola separa PTB-XL de CODE-15% con **AUC 0,880**:
+
+| fracción de energía en 40-100 Hz (mediana) | code15 | samitrop | ptbxl |
+|---|---|---|---|
+| | 0,00228 | 0,00073 | **0,00909** (4× code15) |
+
+Hipótesis inicial: ruido de línea eléctrica (PTB-XL es europeo, 50 Hz; CODE-15%/SaMi-Trop son brasileños, 60 Hz). **Medida y descartada**: el ratio de potencia en 48-52 Hz vs. 58-62 Hz no separa los datasets de forma consistente con esa hipótesis. El delator es una diferencia más general de ancho de banda/contenido de alta frecuencia entre el equipo de PTB-XL (Alemania, años 90) y el de CODE-15%/SaMi-Trop (Brasil, 2010s), no específicamente la red eléctrica.
+
+**Se probó la solución obvia (pasabajos a 40 Hz) y no alcanza**: baja el AUC de separación de 0,880 a 0,803, sigue siendo una pista fuerte. No se implementa — no vale el costo (reprocesar y volver a versionar los datos) por una mejora parcial. Contraparte importante: **SaMi-Trop y CODE-15% son difíciles de distinguir entre sí** (AUC 0,598, casi azar) — esto es lo que habilita la arena serológica de la sección siguiente.
+
+**Decidido (2026-08-12): PTB-XL se saca del entrenamiento por completo, no solo con peso reducido.** Sigue procesándose (val/test lo necesitan), pero el DataLoader de entrenamiento lo excluye por default — así no hay ninguna oportunidad, ni parcial, de aprender el atajo del origen. Pasa a ser exclusivamente el conjunto de la **arena C, especificidad cruzada de población** (más abajo), que con esta decisión mide generalización real: el modelo nunca vio una señal de PTB-XL entrenando. El costo en volumen es chico (15.286 negativos menos, contra ~232.000 que ya aporta CODE-15% solo). Queda un flag `--con-ptbxl` para correr la ablación inversa y confirmar que sacarlo no perdía nada.
+
+**Decidido (2026-08-12): el desbalance de clases (1,9%-2,8% positivos) se maneja con `pos_weight` derivado de las masas ponderadas, no con oversampling, como default.** Sobremuestrear los 1.083 registros de SaMi-Trop en train para verlos ~15-20 veces por época acumula cientos de exposiciones a un puñado de grabaciones en 30 épocas, con augmentación (ruido gaussiano, dropout de derivación) que no está pensada para borrar la pista espectral recién encontrada — el ruido aditivo sube contenido de alta frecuencia, no lo baja. Oversampling queda como ablación (`--sampler balanceado`, con `pos_weight` recalculado para no apilar los dos mecanismos), a correr después del primer resultado y bajo el mismo test de señal barajada de más abajo.
+
+**Acordado (2026-08-12): el primer modelo que se corre no busca un resultado, busca confirmar que no hay errores.** Antes de la primera corrida con volumen real (~2 h), se corre sobre una muestra muy chica (`--limit-train 500 --epocas 1`, <2 min) — el único objetivo es que el pipeline entero funcione de punta a punta sin romperse: carga de datos, forma del tensor, pérdida enmascarada sin NaN, checkpoint escrito, loop de validación completo. **El AUC de esa corrida no se interpreta como señal**, la muestra es demasiado chica para significar algo.
+
+### Las arenas de evaluación (enmienda a Fase 3, decisión 4)
+
+Fase 3 pedía "evaluar solo contra etiqueta fuerte (serología)". No es computable así como está escrito: SaMi-Trop, la única fuente con etiqueta fuerte, es 100% positiva (1.545 de 1.545) — sin un grupo sano para comparar no hay AUC, AUPRC, especificidad ni PPV, solo recall. El go/no-go (AUC ≥0,93 / 0,85-0,93 / <0,85, Fase 3) y el punto de operación (95% sensibilidad, banda PPV≥30%) sí necesitan las dos clases. Se resuelve con **arenas separadas, nunca una métrica agregada entre datasets**:
+
+- **Arena A — CODE-15% sola (decide el go/no-go).** Dos clases, una sola fuente ⇒ el atajo de fuente es imposible por construcción dentro de la arena. Prevalencia a nivel paciente 1,91% (val) / 1,92% (test) — coincide con el 1,90% que asume toda la tabla de operación de Fase 3, lo que hace interpretables el PPV y las "serologías por caso". AUC-ROC, AUPRC, sens/espec/PPV en los dos umbrales.
+- **Arena B — SaMi-Trop (solo recall).** De los pacientes confirmados por serología, cuántos se detectan en el umbral calibrado en A. No se reporta AUC/especificidad/PPV: no hay negativos.
+- **Arena C — PTB-XL (solo especificidad).** Población no endémica, otro equipo/década — mide robustez cruzada de población, no discriminación.
+- **Arena D — serológica ampliada, SaMi-Trop(+) vs. CODE-15%(−).** La única forma de obtener un AUC con positivos confirmados por serología. Válida porque esas dos fuentes tienen baja separabilidad entre sí (AUC 0,598 medido arriba) — si esa sonda de fuente diera alto, esta arena se reportaría como cota superior, no como resultado.
+- **Diagnóstico de atajo (no es performance)**: AUC pooled entre todos los datasets menos AUC de arena A. Ese delta es la magnitud del atajo de fuente en las unidades del go/no-go.
+
+Umbrales de operación (bajo = 95% sensibilidad, alto = PPV≥30%) se calibran **siempre en validación, arena A, nunca en test**.
 
 ---
 
