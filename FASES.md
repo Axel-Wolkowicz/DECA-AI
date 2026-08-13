@@ -416,6 +416,38 @@ En `entrenar_epoca()` (`src/train.py`), `suma_chagas += float(l_chagas)` convert
 
 **Pendiente inmediato:** correr más épocas (estimado ~5 min/época a este throughput) para ver si arena A converge cerca del umbral de despliegue, y correr la ablación de `--peso-strong` (1,0 vs. 3,0 vs. 5,0) una vez que haya una corrida de varias épocas de referencia.
 
+### Corrida de 8 épocas, cortada en la 6: overfitting detectado a mano (2026-08-13)
+
+Misma configuración (dataset completo, batch 128, `peso_strong=3,0`), pensada para 8 épocas. Se fue siguiendo época por época en vivo:
+
+| | ép. 1 | ép. 2 | ép. 3 | ép. 4 | ép. 5 | ép. 6 |
+|---|---|---|---|---|---|---|
+| loss chagas (train) | 1,238 | 1,151 | 1,087 | 1,011 | 0,980 | **0,981** |
+| Arena A AUC | 0,8023 | 0,7970 | 0,8238 | 0,8397 | 0,8338 | 0,8135 |
+| Arena A AUPRC | 0,1362 | 0,1279 | 0,1328 | **0,1500** | 0,1369 | 0,1152 |
+| Arena B recall (bajo) | 75,2% | 83,5% | 89,1% | 88,7% | 92,2% | 93,0% |
+| Arena D AUC | 0,6385 | 0,7230 | 0,7995 | 0,8061 | 0,8445 | 0,8405 |
+| atajo (`delta vs A`) | −0,045 | −0,024 | −0,009 | −0,011 | −0,001 | **+0,0059** |
+| RBBB AUPRC | 0,7516 | 0,7962 | 0,7915 | 0,7818 | 0,8032 | 0,7793 |
+
+**En la época 6 coincidieron los tres indicios que se venían vigilando desde la 5, en la misma época:** la loss de train dejó de bajar por primera vez en toda la corrida (0,980 → 0,981), el AUPRC de arena A tocó su mínimo (0,1152, el peor de las 6 épocas), y el diagnóstico de atajo **cruzó de negativo a positivo** (+0,0059) por primera vez — señal de que el modelo empezó a apoyarse un poco en la pista de origen del dato en vez de en la enfermedad. Individualmente cualquiera de los tres podría ser ruido (arena B/D se miden sobre solo 230 positivos de SaMi-Trop y 2.830 de PTB-XL en val, chico y ruidoso), pero los tres juntos en la misma época es la combinación acordada de antemano para frenar y mirar.
+
+**Se cortó la corrida ahí** (proceso interrumpido a mano, no llegó a completar la época 7). No se perdió nada de valor: el mejor checkpoint quedó fijado en la **época 4** (AUC 0,8397, AUPRC 0,1500, atajo −0,011 — el mejor resultado de las 6 épocas en las tres dimensiones a la vez) y ese es el que `mejor.pt` tenía guardado. Se copió a `models/real8ep/mejor.pt` en el repo (fuera de `.gitignore`, ~26 MB) para no depender de que el SSD esté siempre conectado para tener el mejor modelo a mano; el resto de los artefactos de la corrida (`historia.json`, `args.json`, `ultimo.pt` — que ni llegó a escribirse, se escribe solo al completar todas las épocas) se quedan en el SSD, no en git.
+
+**Nota sobre `ultimo.pt`:** al cortar a mano antes de que el loop termine, ese archivo nunca se llega a escribir (se guarda una sola vez, después de la última época). Es una limitación real: si se corta la corrida, la única forma de recuperar algo es `mejor.pt`, y si nunca hubo un "nuevo mejor" antes de cortar, no queda nada guardado. Es la motivación directa de `--resume` (más abajo).
+
+### Tres mejoras a `train.py`, motivadas directamente por esta corrida (2026-08-13)
+
+**1. Parada temprana automática (`--paciencia-atajo`, default 2).** Codifica el criterio que se acaba de aplicar a mano: cuenta épocas *seguidas* donde la época no fue un nuevo mejor **y** el atajo de fuente dio positivo; al llegar a 2, corta sola. El default es 2 y no 1 a propósito — lo que se hizo a mano fue reaccionar al primer cruce, pero arena B/C son chicas y un cruce aislado por ruido no debería tirar abajo toda una corrida de 30 épocas; pedir 2 seguidas es el punto medio entre reaccionar rápido y no ser hipersensible a una sola época ruidosa. En 0 se desactiva.
+
+**2. `--resume RUTA.pt`.** Hasta ahora cortar a mano tiraba todo el progreso: no había forma de seguir entrenando desde un checkpoint, solo volver a arrancar de cero. Ahora los checkpoints (`mejor.pt`/`ultimo.pt`) guardan también el estado del optimizador y del scheduler, no solo los pesos del modelo, y `--resume` los carga y sigue desde `epoca_del_checkpoint + 1`. **Limitación conocida, aceptada por tiempo:** si se resume desde un checkpoint grabado antes de la última época que llegó a correr (el caso típico de cortar a mano unas épocas después del último "nuevo mejor" — exactamente lo que pasó acá, cortado en la 6 con el mejor en la 4), las épocas intermedias ya vistas se vuelven a correr. No es grave — cuesta unos minutos repitiendo trabajo, no corrompe nada — pero es una asimetría a tener presente: `--resume` retoma desde el **mejor** checkpoint, no desde el último intento.
+
+**3. `historia.json` se extiende en vez de pisarse** si ya existe en la carpeta de la corrida (relevante al resumir con el mismo `--nombre`): antes se sobreescribía completo en cada corrida, así que resumir hubiera borrado el registro de las épocas ya hechas.
+
+Verificado con corridas de humo antes de usar: `--resume` cargó correctamente el checkpoint de la época 4 de esta corrida (`AUPRC arena A 0.1500 -> sigue desde epoca 5`) y arrancó del punto correcto.
+
+**Ablación lanzada (2026-08-13, en curso):** `--peso-strong 1.0` contra el `3,0` de esta corrida, mismo resto de hiperparámetros, con la parada temprana ya activada por default — para ver si bajar el peso de SaMi-Trop retrasa o evita el cruce del atajo en la época 5-6. Es la primera prueba de la hipótesis de que `peso_strong=3,0` (que le da a los 1.083 registros de SaMi-Trop ~89× de exposición efectiva, ver más arriba) está empujando al modelo a apoyarse en rasgos específicos de esa cohorte en vez de en la enfermedad en general — coherente con que arena B (recall SaMi-Trop) siguiera subiendo fuerte (75%→93%) en las mismas épocas en que arena A se estancaba. Resultado pendiente.
+
 ---
 
 ## Fase 5 — Validación y evaluación 🔲

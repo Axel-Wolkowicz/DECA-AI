@@ -25,6 +25,25 @@ Decisiones que este script implementa y que estan argumentadas en FASES.md, Fase
 - **Se elige el mejor checkpoint por AUPRC de arena A en validacion**, no por loss. La
   loss mezcla las dos tareas y esta dominada por el desbalance; la arena A es la que
   decide el go/no-go.
+
+**Parada temprana (2026-08-13).** Codifica el criterio que se uso a mano para cortar la
+primera corrida real de 8 epocas en la epoca 6: en la misma epoca coincidieron loss de
+train estancada, AUPRC de arena A en su minimo de la corrida, Y el diagnostico de atajo
+(`delta vs A`) cruzando de negativo a positivo por primera vez. `--paciencia-atajo N`
+(default 2) cuenta epocas seguidas donde la epoca NO fue un nuevo mejor Y el atajo dio
+positivo; al llegar a N, corta. En 0 se desactiva. El default es 2, no 1 -- lo que se hizo
+a mano fue reaccionar al primer cruce, pero arena B/C son chicas (230/2.830 casos) y un
+cruce aislado por ruido no deberia tirar toda la corrida; pedir 2 seguidas es el punto
+medio entre reaccionar rapido y no ser hipersensible a una sola epoca ruidosa.
+
+**Reanudar con --resume RUTA.pt** (2026-08-13). Cortar a mano (Ctrl+C o matar el proceso)
+tiraba el progreso: no habia forma de seguir desde un checkpoint, solo volver a arrancar
+de cero. Carga los pesos del modelo, el estado del optimizador y del scheduler, y sigue
+desde `epoca_del_checkpoint + 1`. Limitacion conocida: si se resume desde un checkpoint
+que quedo grabado antes de la ultima epoca corrida (p. ej. se corto a mano 2 epocas
+despues del ultimo "nuevo mejor"), esas 1-2 epocas se vuelven a correr -- no se intento
+resolver eso por tiempo, y no es grave: en el peor caso se pierden un par de minutos
+repitiendo epocas ya vistas, no hay riesgo de corromper nada.
 """
 import argparse
 import json
@@ -175,6 +194,10 @@ def main():
     p.add_argument("--sin-amp", dest="amp", action="store_false")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--nombre", type=str, default=None, help="nombre de la corrida (default: timestamp)")
+    p.add_argument("--resume", type=str, default=None,
+                   help="ruta a un checkpoint .pt (mejor.pt o ultimo.pt) desde donde continuar")
+    p.add_argument("--paciencia-atajo", type=int, default=2,
+                   help="cortar tras N epocas seguidas sin mejora Y con atajo de fuente positivo (0 = desactivado)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -211,10 +234,28 @@ def main():
     planificador = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizador, mode="max", factor=0.1, patience=3)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
 
-    historia, mejor_auprc = [], -1.0
+    epoca_inicio, mejor_auprc, epocas_atajo_seguidas = 1, -1.0, 0
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        modelo.load_state_dict(ckpt["modelo"])
+        if "optimizador" in ckpt:
+            optimizador.load_state_dict(ckpt["optimizador"])
+        if "planificador" in ckpt:
+            planificador.load_state_dict(ckpt["planificador"])
+        epoca_inicio = ckpt.get("epoca", 0) + 1
+        mejor_auprc = ckpt.get("auprc_arena_A", -1.0)
+        print(f"Retomando desde {args.resume}: epoca {ckpt.get('epoca')}, "
+              f"AUPRC arena A {mejor_auprc:.4f} -> sigue desde epoca {epoca_inicio}")
+
+    # Si dir_corrida ya tiene historia.json (p. ej. se resume en el mismo --nombre), se
+    # extiende en vez de pisarla -- asi el registro de una corrida cortada y retomada
+    # queda completo en un solo archivo.
+    historia_path = dir_corrida / "historia.json"
+    historia = json.loads(historia_path.read_text(encoding="utf-8")) if historia_path.exists() else []
     (dir_corrida / "args.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
 
-    for epoca in range(1, args.epocas + 1):
+    epoca = epoca_inicio - 1  # por si --resume ya llego a args.epocas y el loop no corre
+    for epoca in range(epoca_inicio, args.epocas + 1):
         t0 = time.time()
         print(f"\nEpoca {epoca}/{args.epocas}")
         l_chagas, l_rbbb = entrenar_epoca(
@@ -237,19 +278,41 @@ def main():
         })
         (dir_corrida / "historia.json").write_text(json.dumps(historia, indent=2), encoding="utf-8")
 
+        es_nuevo_mejor = False
         if np.isfinite(ap_arena_a):
             planificador.step(ap_arena_a)
-            if ap_arena_a > mejor_auprc:
+            es_nuevo_mejor = ap_arena_a > mejor_auprc
+            if es_nuevo_mejor:
                 mejor_auprc = ap_arena_a
                 torch.save(
-                    {"modelo": modelo.state_dict(), "epoca": epoca, "auprc_arena_A": ap_arena_a,
-                     "umbrales": res.get("umbrales"), "args": vars(args)},
+                    {"modelo": modelo.state_dict(), "optimizador": optimizador.state_dict(),
+                     "planificador": planificador.state_dict(), "epoca": epoca,
+                     "auprc_arena_A": ap_arena_a, "umbrales": res.get("umbrales"), "args": vars(args)},
                     dir_corrida / "mejor.pt",
                 )
                 print(f"  -> nuevo mejor checkpoint (AUPRC arena A {ap_arena_a:.4f})")
 
-    torch.save({"modelo": modelo.state_dict(), "epoca": args.epocas, "args": vars(args)},
-               dir_corrida / "ultimo.pt")
+        # Parada temprana: el mismo criterio que se aplico a mano el 2026-08-13 al cortar
+        # la primera corrida real en la epoca 6 (ver docstring del modulo). Se mira
+        # SIEMPRE que evaluar_arenas haya podido calcular el diagnostico de atajo (no
+        # depende de que ap_arena_a sea finito) porque el atajo se calcula sobre el pool
+        # completo de val, no solo sobre arena A.
+        delta_atajo = res.get("diagnostico_atajo", {}).get("delta_vs_arena_A", float("nan"))
+        if not es_nuevo_mejor and np.isfinite(delta_atajo) and delta_atajo > 0:
+            epocas_atajo_seguidas += 1
+        else:
+            epocas_atajo_seguidas = 0
+        if args.paciencia_atajo > 0 and epocas_atajo_seguidas >= args.paciencia_atajo:
+            print(f"\nParada temprana: {epocas_atajo_seguidas} epocas seguidas sin mejora y con "
+                  f"atajo de fuente positivo (delta {delta_atajo:+.4f}). El mejor checkpoint sigue "
+                  f"siendo el de la epoca con AUPRC {mejor_auprc:.4f}.")
+            break
+
+    torch.save(
+        {"modelo": modelo.state_dict(), "optimizador": optimizador.state_dict(),
+         "planificador": planificador.state_dict(), "epoca": epoca, "args": vars(args)},
+        dir_corrida / "ultimo.pt",
+    )
     print(f"\nListo. Mejor AUPRC de arena A: {mejor_auprc:.4f}. Artefactos en {dir_corrida}")
 
 
