@@ -446,7 +446,75 @@ Misma configuración (dataset completo, batch 128, `peso_strong=3,0`), pensada p
 
 Verificado con corridas de humo antes de usar: `--resume` cargó correctamente el checkpoint de la época 4 de esta corrida (`AUPRC arena A 0.1500 -> sigue desde epoca 5`) y arrancó del punto correcto.
 
-**Ablación lanzada (2026-08-13, en curso):** `--peso-strong 1.0` contra el `3,0` de esta corrida, mismo resto de hiperparámetros, con la parada temprana ya activada por default — para ver si bajar el peso de SaMi-Trop retrasa o evita el cruce del atajo en la época 5-6. Es la primera prueba de la hipótesis de que `peso_strong=3,0` (que le da a los 1.083 registros de SaMi-Trop ~89× de exposición efectiva, ver más arriba) está empujando al modelo a apoyarse en rasgos específicos de esa cohorte en vez de en la enfermedad en general — coherente con que arena B (recall SaMi-Trop) siguiera subiendo fuerte (75%→93%) en las mismas épocas en que arena A se estancaba. Resultado pendiente.
+### Ablación `--peso-strong 1,0` vs. `3,0`: el atajo NO depende del peso de SaMi-Trop (2026-08-13)
+
+Hipótesis a probar: que `peso_strong=3,0` (que le da a los 1.083 registros de SaMi-Trop ~89× de exposición efectiva, ver más arriba) fuera lo que empujaba al modelo a apoyarse en rasgos específicos de esa cohorte en vez de en la enfermedad en general — coherente en su momento con que arena B (recall SaMi-Trop) siguiera subiendo fuerte (75%→93%) en las mismas épocas en que arena A se estancaba y el atajo cruzaba a positivo. Se corrió `--peso-strong 1.0`, mismo resto de hiperparámetros, dataset completo, 8 épocas, con la parada temprana (`--paciencia-atajo`, ver abajo) ya activada por default.
+
+| | ép. 1 | ép. 2 | ép. 3 | ép. 4 | ép. 5 | ép. 6 | ép. 7 | ép. 8 |
+|---|---|---|---|---|---|---|---|---|
+| Arena A AUPRC | 0,1374 | 0,1310 | 0,1688 | **0,1755** | 0,1538 | 0,1525 | 0,1490 | 0,1615 |
+| atajo (`delta vs A`) | −0,051 | −0,016 | −0,015 | −0,002 | −0,004 | **+0,0021** | −0,002 | −0,008 |
+
+**El cruce a positivo pasó en la época 6 en las dos corridas** (+0,0059 con peso 3,0; +0,0021 con peso 1,0) — casi el mismo punto exacto, con las dos corridas siendo completamente independientes salvo por ese único hiperparámetro. **Esto descarta la hipótesis**: el atajo no es un efecto del peso de SaMi-Trop, aparece en algún punto del entrenamiento independientemente de cuánto se pondere la etiqueta serológica. Sigue sin identificarse la causa real (candidatos para más adelante: el punto en que el learning rate todavía no bajó por el scheduler, o simplemente que el modelo cruza cierto umbral de capacidad donde empieza a ser rentable usar la pista espectral de PTB-XL descripta más arriba). Con `peso_strong=1,0` el cruce fue una sola época aislada (no dos seguidas), así que la parada temprana no se disparó y la corrida completó las 8 épocas.
+
+**Resultado neto: `peso_strong=1,0` ganó.** Mejor checkpoint de las dos corridas, misma época (4) en ambas:
+
+| | `peso_strong=3,0` | **`peso_strong=1,0`** |
+|---|---|---|
+| Arena A AUPRC (mejor) | 0,1500 | **0,1755** |
+| Arena A AUC (esa época) | 0,8397 | 0,8378 |
+| atajo (esa época) | −0,011 | −0,002 |
+
+El checkpoint de esta ablación (`models/abl-peso1/mejor.pt` en el repo) reemplaza al de `real8ep` como mejor resultado de referencia.
+
+### Tercer punto del barrido — `peso_strong=5,0` (2026-08-13): confirma la tendencia y triangula el cruce
+
+Mismos hiperparámetros, misma parada temprana. Resultado:
+
+| `peso_strong` | mejor AUPRC arena A | época del mejor |
+|---|---|---|
+| **1,0** | **0,1755** | 4 |
+| 3,0 | 0,1500 | 4 |
+| 5,0 | 0,1460 | 7 |
+
+**El barrido queda cerrado con `peso_strong=1,0` como ganador claro**, con una tendencia monótona en los tres puntos: a más peso a la etiqueta serológica, peor arena A. Esto revisa la decisión original de la sección "Implementación": la ponderación por confianza que pide la Fase 3 (decisión 4) **no ayuda en este dataset** — `pos_weight` ya corrige el submuestreo de SaMi-Trop por sí solo (documentado más arriba), y pedirle un peso adicional lo hace sobreexpresarse en el gradiente sin mejorar la métrica que importa. **Nuevo default recomendado: `peso_strong=1,0`.**
+
+**El cruce del atajo en la época 6 se repitió por tercera vez, en las tres corridas independientes:**
+
+| `peso_strong` | atajo en época 6 |
+|---|---|
+| 1,0 | +0,0021 |
+| 3,0 | +0,0059 |
+| **5,0** | **+0,0077** |
+
+Con tres corridas independientes cruzando en el mismo punto exacto, ya no es plausible que sea ruido — es un fenómeno estructural del entrenamiento en esa época, no un efecto de `peso_strong` (que ya se había descartado como causa del *momento* del cruce). Lo que sí correlaciona con `peso_strong` es la **magnitud** del cruce (0,002 → 0,006 → 0,008, también monótona) — más peso a SaMi-Trop no cambia cuándo pasa, pero sí lo agrava un poco cuando pasa. En las tres corridas el cruce fue transitorio (1-2 épocas) y la parada temprana (que pide 2 seguidas) no se disparó en ninguna; con `peso_strong=5,0` incluso se recuperó a un nuevo mejor checkpoint en la época 7 inmediatamente después.
+
+**Pendiente:** investigar la causa real del cruce en la época 6 (candidatos: el punto en que el LR scheduler todavía no actuó — `patience=3` de `ReduceLROnPlateau` significa que recién podría bajar el LR después de 3 épocas sin mejora, así que la 6 cae justo en esa ventana; o que el modelo cruza un umbral de capacidad donde empieza a ser rentable usar la pista espectral de PTB-XL) antes de escalar a una corrida de 30 épocas con `peso_strong=1,0`.
+
+### El patrón real no es "época 6", es "2 épocas seguidas sin mejorar" — y las tres corridas no son tan independientes como parecía (2026-08-13)
+
+Antes de gastar más GPU, se reanalizaron los `historia.json` de las tres corridas ya hechas (sin entrenar nada nuevo). Resultado, alineando por "épocas sin mejorar" en vez de por número de época:
+
+```
+              épocas sin mejorar (por época):     atajo delta en esas épocas
+peso 1,0:     0,1,0,0,1,2,3,4                     ...,-0.004,+0.0021,-0.0024,-0.0075
+peso 3,0:     0,1,2,0,1,2,3,4                     ...,-0.001,+0.0059,-0.0002,-0.0019
+peso 5,0:     0,1,2,0,1,2,0,1                     ...,-0.002,+0.0077,+0.0002(nuevo mejor)
+```
+
+**El cruce pasa siempre exactamente con 2 épocas seguidas sin mejorar**, no en la "época 6" en sí — coincidía con la época 6 en las tres corridas porque las tres tuvieron su último "nuevo mejor" en la época 4 antes de estancarse (4+2=6). Pero el patrón **no es monótono**: si fuera "cuanto más estancado, más se apoya en el atajo", tendría que seguir empeorando en las épocas 3 y 4 sin mejorar, y en cambio se recupera solo (vuelve a negativo, o directamente a un nuevo mejor checkpoint como en `peso_strong=5,0`). No encaja con una historia simple de "se estanca y busca la salida fácil".
+
+**El problema metodológico, más importante que el patrón en sí:** las tres corridas usan **la misma semilla (`seed=42`)** — mismo peso inicial, mismo orden de datos. `peso_strong` solo reescala el gradiente de 1.083 registros de SaMi-Trop sobre 238.027 en total, así que es totalmente plausible que las tres trayectorias de optimización sean casi la misma para el grueso del modelo, y que "siempre cruza con 2 épocas sin mejorar" sea un artefacto de la semilla compartida — no una ley del entrenamiento. **No fueron tres corridas independientes como se venía asumiendo, y esa es la causa más probable de por qué el patrón se ve tan limpio.**
+
+**Prueba pendiente, acordada pero no lanzada por falta de tiempo:** correr `peso_strong=1,0` (el mejor default hasta ahora) con una semilla distinta (`--seed` ≠ 42), 8 épocas, y ver si el cruce se sigue disparando a las 2 épocas sin mejorar (evidencia de que es real) o se mueve/desaparece (evidencia de que era ruido de la semilla compartida). **No se escala a una corrida de 30 épocas hasta tener esta respuesta** — decisión explícita del usuario, no se entrena "a ciegas" sin entender la causa.
+
+**Oversampling (`--sampler balanceado`) evaluado como posible ruta y descartado para esta pregunta puntual.** No ataca la misma incógnita: PTB-XL está excluido del train siempre, y el atajo que se mide depende de cómo el modelo generaliza a PTB-XL en validación — oversampling solo cambia la mezcla de code15/SaMi-Trop *dentro* de train, sin razón directa para esperar que mueva el momento del cruce. Además tiene un riesgo conocido en la dirección contraria: repetir las 1.083 grabaciones de SaMi-Trop ~15-20× por época (contra verlas una sola vez con `pos_weight` reescalado) es la forma más directa de memorizar cualquier resto de pista de origen que haya sobrevivido al preprocesado de Fase 2, específica de esos archivos puntuales — podría empeorar el atajo, no mejorarlo. Sigue siendo una ablación válida para ver si mejora arena A en general, pero es una pregunta distinta a la del cruce, y no es la siguiente a correr.
+
+### Dos utilidades agregadas a `train.py`, motivadas por la corrida cortada de la sección anterior (2026-08-13)
+
+**1. Parada temprana automática (`--paciencia-atajo`, default 2).** Codifica el criterio que se aplicó a mano para cortar la corrida de `peso_strong=3,0` en la época 6: cuenta épocas *seguidas* donde la época no fue un nuevo mejor **y** el atajo de fuente dio positivo; al llegar a 2, corta sola. El default es 2 y no 1 a propósito — lo que se hizo a mano fue reaccionar al primer cruce, pero arena B/C son chicas y un cruce aislado por ruido no debería tirar abajo toda una corrida de 30 épocas (la ablación de `peso_strong=1,0` es la prueba: cruzó en la época 6, pero al ser una sola época aislada, no dos seguidas, la corrida siguió sola hasta el final sin intervención). En 0 se desactiva.
+
+**2. `--resume RUTA.pt`.** Hasta esta corrida, cortar a mano tiraba todo el progreso: no había forma de seguir entrenando desde un checkpoint, solo volver a arrancar de cero (fue justo lo que pasó con la corrida de `peso_strong=3,0`, cortada en la época 6 sin `ultimo.pt` porque ese archivo solo se escribe al completar el loop entero). Ahora los checkpoints (`mejor.pt`/`ultimo.pt`) guardan también el estado del optimizador y del scheduler, no solo los pesos del modelo — por eso `mejor.pt` pasó de pesar ~26 MB a **~79 MB** (los dos buffers de momento de Adam pesan lo mismo que el modelo cada uno) — y `--resume` los carga y sigue desde `epoca_del_checkpoint + 1`. `historia.json` se extiende en vez de pisarse si ya existe en la carpeta de la corrida, para que resumir con el mismo `--nombre` no borre el registro de las épocas ya hechas. **Limitación conocida, aceptada por tiempo:** si se resume desde un checkpoint grabado antes de la última época que llegó a correr, las épocas intermedias ya vistas se vuelven a correr — no es grave, cuesta unos minutos repitiendo trabajo, pero es una asimetría a tener presente (`--resume` retoma desde el **mejor** checkpoint, no desde el último intento). Verificado con una corrida de humo antes de usarlo en la ablación real: cargó correctamente el checkpoint de la época 4 y arrancó de la 5.
 
 ---
 
