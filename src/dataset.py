@@ -23,27 +23,26 @@ Tres cosas que este modulo resuelve y que no son obvias:
    Abrirlo en __init__ hace que el handle se copie al hacer fork/spawn y da lecturas
    corruptas o cuelgues.
 
-Sobre PESO_STRONG=3.0 (ponderacion por confianza, Fase 3 decision 4). SaMi-Trop es 0,45%
+Sobre PESO_STRONG=1,0 (ponderacion por confianza, Fase 3 decision 4). SaMi-Trop es 0,45%
 de los registros de train, pero eso NO es lo que ve el optimizador: como todos sus
 registros son positivos, `pos_weight` (41x) ya le corrige el submuestreo y con peso 1,0
 ya se lleva el 19,1% del gradiente de la clase positiva. El eje que `peso_strong` mueve es
 otro: cuanto vale una etiqueta serologica contra una autorreportada. Medido sobre el train
 real (238.027 registros, 4.574 positivos autorreportados + 1.083 serologicos):
 
-    peso_strong   pos_weight   masa+ de SaMi-Trop   exposicion efectiva
-        1,0          41,1            19,1%                  41x
-        3,0          29,7            41,5%                  89x   <- default
-        5,0          23,3            54,2%                 116x
-       20,0           8,9            82,6%                 177x
+    peso_strong   pos_weight   masa+ de SaMi-Trop   exposicion efectiva   AUPRC arena A
+        1,0          41,1            19,1%                  41x            0,1755  <- default
+        3,0          29,7            41,5%                  89x            0,1500
+        5,0          23,3            54,2%                 116x            0,1460
 
-3,0 deja a la serologia como co-protagonista de la señal positiva sin dominarla. De 5,0
-para arriba, 1.083 grabaciones aportan mas de la mitad de todo lo que el modelo aprende
-sobre "positivo" y eso ya es memorizar la cohorte, que es el riesgo por el que la Fase 4
-descarto el oversampling. Efecto lateral a tener presente: subir peso_strong BAJA
-pos_weight (41 -> 29,7), o sea que de paso les baja el peso a los positivos de CODE-15%.
-
-Es barato de settlear empiricamente y por eso es la primera ablacion (--peso-strong): la
-arena A es CODE-15% sola, asi que es inmune a este cambio y hace de juez honesto.
+Razonamiento teorico original (docstring previo): subir peso_strong dejaria a la
+serologia como co-protagonista de la señal positiva sin dominarla del todo, y por eso
+se eligio 3,0 como default inicial. El barrido empirico (--peso-strong, FASES.md Fase 4,
+2026-08-13) lo contradijo: AUPRC de arena A cae monotonicamente al subir peso_strong, y
+el tamaño del cruce del atajo de fuente tambien crece con el (0,0021 -> 0,0059 -> 0,0077).
+1,0 gana en las dos metricas que importan, asi que queda como default. Efecto lateral a
+tener presente: subir peso_strong BAJA pos_weight (41 -> 29,7), o sea que de paso les
+baja el peso a los positivos de CODE-15% — parte de por que empeora arena A.
 """
 import h5py
 import numpy as np
@@ -54,8 +53,8 @@ from torch.utils.data import Dataset
 from config import CODE15_EXAMS_CSV, FASE2_HDF5, FASE2_METADATA_PATH
 
 # Pesos por tier de confianza de la etiqueta (columna `confianza` de metadata).
-# El 3.0 de `strong` esta argumentado con numeros en el docstring del modulo.
-PESO_STRONG = 3.0
+# El 1.0 de `strong` esta argumentado con numeros en el docstring del modulo.
+PESO_STRONG = 1.0
 PESOS_CONFIANZA = {"weak": 1.0, "strong": PESO_STRONG, "negativo-presunto": 1.0}
 
 

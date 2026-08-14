@@ -516,6 +516,30 @@ peso 5,0:     0,1,2,0,1,2,0,1                     ...,-0.002,+0.0077,+0.0002(nue
 
 **2. `--resume RUTA.pt`.** Hasta esta corrida, cortar a mano tiraba todo el progreso: no había forma de seguir entrenando desde un checkpoint, solo volver a arrancar de cero (fue justo lo que pasó con la corrida de `peso_strong=3,0`, cortada en la época 6 sin `ultimo.pt` porque ese archivo solo se escribe al completar el loop entero). Ahora los checkpoints (`mejor.pt`/`ultimo.pt`) guardan también el estado del optimizador y del scheduler, no solo los pesos del modelo — por eso `mejor.pt` pasó de pesar ~26 MB a **~79 MB** (los dos buffers de momento de Adam pesan lo mismo que el modelo cada uno) — y `--resume` los carga y sigue desde `epoca_del_checkpoint + 1`. `historia.json` se extiende en vez de pisarse si ya existe en la carpeta de la corrida, para que resumir con el mismo `--nombre` no borre el registro de las épocas ya hechas. **Limitación conocida, aceptada por tiempo:** si se resume desde un checkpoint grabado antes de la última época que llegó a correr, las épocas intermedias ya vistas se vuelven a correr — no es grave, cuesta unos minutos repitiendo trabajo, pero es una asimetría a tener presente (`--resume` retoma desde el **mejor** checkpoint, no desde el último intento). Verificado con una corrida de humo antes de usarlo en la ablación real: cargó correctamente el checkpoint de la época 4 y arrancó de la 5.
 
+### Corrida de control con otra semilla (`abl-peso1-seed123`, 2026-08-14): el streak es real, el cruce no es determinista
+
+Prueba pendiente de la sección anterior: `peso_strong=1,0`, 8 épocas, `--seed 123` (las tres corridas previas usaban `seed=42`).
+
+```
+Epoca  AUPRC arena A   delta atajo   sin mejorar
+1      0.1481          -0.0464       (nuevo mejor)
+2      0.1435          -0.0027        1
+3      0.1598          -0.0124       (nuevo mejor)
+4      0.1515          -0.0036        1
+5      0.1612          -0.0086       (nuevo mejor)
+6      0.1318          -0.0097        1
+7      0.1481          -0.0011        2   <- mismo punto donde cruzaba con seed=42
+8      0.1654          -0.0052       (nuevo mejor)
+```
+
+Mejor AUPRC arena A: 0.1654 (vs. 0.1755 de la corrida original `peso_strong=1,0` con seed=42 — mismo orden de magnitud).
+
+**Conclusión:** el streak de "2 épocas seguidas sin mejorar" se repite (época 7) — es una dinámica de entrenamiento real, no un artefacto de la semilla. Pero el cruce del atajo **no se repite**: llegó muy cerca de cero (-0.0011, el valor más chico de todo el streak) y se recuperó solo en la época siguiente con un nuevo mejor, sin cruzar a positivo. Con seed=42 cruzó las tres veces exactamente en ese punto; con seed=123, no.
+
+Esto separa las dos partes de la hipótesis original: la coincidencia de fase ("se estanca cada ~2 épocas") es estructural y se explica por la dinámica de optimización en sí (plausible: el scheduler y la superficie de loss producen mesetas periódicas independientemente de la semilla). Pero si en esa meseta el modelo específicamente cae en el atajo de fuente es sensible a la inicialización — no hay una fuerza determinística empujándolo ahí, es más cerca de un roce que de una atracción. Con una sola semilla adicional no se puede descartar del todo (podría cruzar 1 de cada 2-3 semillas), pero baja bastante la urgencia: no parece ser el tipo de problema estructural que garantiza que una corrida larga termine explotando el atajo.
+
+**Implicancia práctica:** con `--paciencia-atajo 2` activo por default, una corrida larga real está protegida igual — si cruza en una meseta de 2 épocas, corta sola; si no cruza (como esta corrida), sigue de largo. Con esto ya se puede considerar habilitada una corrida más larga (sujeto a decisión del usuario), aunque seguiría siendo valioso en algún momento correr una tercera semilla para tener más que 2 puntos de dato.
+
 ---
 
 ## Fase 5 — Validación y evaluación 🔲
