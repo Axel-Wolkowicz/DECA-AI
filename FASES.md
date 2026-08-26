@@ -1,6 +1,6 @@
 # IA — Fases del proyecto y dificultades
 
-Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). **Fase 1 completa** (las 4 tareas de EDA cubiertas por notebooks reproducibles en `notebooks/`); la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). **Fase 2 completa (2026-08-10)**: diseño corregido y código implementado (`src/split_patients.py`, `src/preprocess.py`), corrido sobre el corpus completo: 362.363 registros preprocesados en `fase2_preprocessed.hdf5`, con el split por paciente verificado sin fuga. **Fase 4 en progreso (arrancada 2026-08-12)**: pipeline de entrenamiento implementado y validado de punta a punta (`src/dataset.py`, `src/model.py`, `src/evaluar.py`, `src/train.py`), corre en Windows y Linux; primera corrida real de 1 época sobre el dataset completo dio AUC 0,80 en la arena de go/no-go, con el diagnóstico de atajo de fuente en la dirección correcta. **Corrida larga de 30 épocas completada (2026-08-25, `real30ep`): AUC arena A converge a ~0,843 y no mejora más — NO-GO contra el criterio de Fase 3 (piso 0,85), y por debajo del mejor modelo hasta ahora (`abl-peso1`, AUPRC 0,1755 vs. 0,1705).** **Ablación de oversampling completada (2026-08-26, `real30ep-sampler`): peor que `abl-peso1`, no rompe el techo.** `peso_strong=1,0` (`abl-peso1`) sigue siendo el mejor modelo global; ninguna de las dos rutas propuestas para el desbalance (subir peso, oversampling) supera el techo de AUC ~0,84.
+Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). **Fase 1 completa** (las 4 tareas de EDA cubiertas por notebooks reproducibles en `notebooks/`); la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). **Fase 2 completa (2026-08-10)**: diseño corregido y código implementado (`src/split_patients.py`, `src/preprocess.py`), corrido sobre el corpus completo: 362.363 registros preprocesados en `fase2_preprocessed.hdf5`, con el split por paciente verificado sin fuga. **Fase 4 en progreso (arrancada 2026-08-12)**: pipeline de entrenamiento implementado y validado de punta a punta (`src/dataset.py`, `src/model.py`, `src/evaluar.py`, `src/train.py`), corre en Windows y Linux; primera corrida real de 1 época sobre el dataset completo dio AUC 0,80 en la arena de go/no-go, con el diagnóstico de atajo de fuente en la dirección correcta. **Corrida larga de 30 épocas completada (2026-08-25, `real30ep`): AUC arena A converge a ~0,843 y no mejora más — NO-GO contra el criterio de Fase 3 (piso 0,85), y por debajo del mejor modelo hasta ahora (`abl-peso1`, AUPRC 0,1755 vs. 0,1705).** **Ablación de oversampling completada (2026-08-26, `real30ep-sampler`): peor que `abl-peso1`, no rompe el techo.** `peso_strong=1,0` (`abl-peso1`) sigue siendo el mejor modelo global; ninguna de las dos rutas propuestas para el desbalance (subir peso, oversampling) supera el techo de AUC ~0,84. **Sesión de análisis del 2026-08-26 (ver sección propia al final de Fase 4): el AUC ~0,84 resulta estar en el estado del arte publicado (PLOS NTD 2023 da 0,80; el 5° puesto del Moody Challenge 2025 da 0,840), el go/no-go de 0,93 fijado en Fase 3 no lo alcanza nadie en el campo, buena parte del techo es ruido de etiqueta (serología vs. cardiopatía) y no capacidad del modelo, el scheduler de LR venía apagando el entrenamiento solo desde la época ~7, y PTB-XL —hoy excluido del train— contiene los 3 patrones objetivo del ROADMAP como etiqueta validada.**
 
 Convención de estado: 🔲 no iniciada · 🟡 en progreso · ✅ completa.
 
@@ -619,6 +619,163 @@ Historial completo en `~/DECA-datasets/modelos/real30ep-sampler/historia.json`.
   | `real30ep-sampler` (peso_strong=1,0, con sampler, 30 ép.) | 0,1626 | 0,8365 |
 
 **Conclusión: ninguna de las dos rutas para el desbalance de clases (subir `peso_strong`, oversampling) mueve el techo de AUC ~0,84 en arena A.** `abl-peso1` (peso_strong=1,0, sin oversampling) sigue siendo el mejor modelo de todas las corridas hechas hasta ahora, y sigue sin cruzar el piso de 0,85 de Fase 3. El cuello de botella no parece ser el manejo del desbalance — es capacidad del modelo o de las features, tema para la próxima sección de trabajo.
+
+---
+
+## Sesión del 2026-08-26 — seis hallazgos que reencuadran toda la Fase 4
+
+Sesión de análisis, sin corridas nuevas más allá de la ablación de sampler de arriba. El disparador fue una pregunta simple ("¿por qué no mejora?") y terminó revirtiendo tres supuestos que veníamos arrastrando. Se documenta en orden de importancia, no cronológico.
+
+### 1. El techo NO es del modelo: es de la etiqueta (el hallazgo central)
+
+El paper de referencia de esta tarea exacta —[PLOS NTD 2023](https://journals.plos.org/plosntds/article?id=10.1371%2Fjournal.pntd.0011118), del mismo grupo que produjo CODE-15% y SaMi-Trop, usando **el mismo ResNet1D que nosotros copiamos**— reporta un experimento que nunca habíamos considerado: mismo modelo, mismos pesos, cambiando *únicamente qué cuenta como positivo*.
+
+| positivos definidos como | REDS-II | ELSA-Brasil |
+|---|---|---|
+| todos los seropositivos | 0,68 | 0,59 |
+| **solo cardiopatía chagásica crónica (CCC)** | **0,82** | **0,77** |
+
+**+0,14 a +0,18 de AUC sin tocar una línea de código.** La explicación de los autores: "el modelo es capaz de detectar pacientes con CCC a partir del trazado con alta discriminación; para los pacientes sin CCC la discriminación es menor". La razón clínica es que la mayoría de los seropositivos nunca desarrolla compromiso cardíaco — su ECG es genuinamente normal. Son **positivos inaprendibles**: estamos penalizando al modelo por no ver algo que no está en la señal.
+
+**Esto aplica de lleno a DECA y hay un desalineamiento en nuestro propio planteo.** El ROADMAP dice, desde el título, que el objetivo es detectar **cardiopatía chagásica**. Nuestras etiquetas (`chagas_label`) son serología/autorreporte, o sea **infección**. Entrenamos y evaluamos contra un blanco más ancho que el que declaramos querer, y la brecha entre ambos es exactamente donde se pierde el AUC.
+
+**Evidencia propia, que ya teníamos y no habíamos leído así:** en todas nuestras corridas, misma red, mismo cuerpo compartido, mismos datos:
+
+| cabeza | AUPRC |
+|---|---|
+| RBBB (patrón ECG, anotado desde la señal) | **0,76 – 0,80** |
+| Chagas (serología/autorreporte) | 0,15 – 0,17 |
+
+El modelo lee patología del ECG ~5× mejor que "esta persona tiene anticuerpos". Ese cociente es la medida de nuestro propio ruido de etiqueta, y estaba a la vista desde la primera corrida.
+
+### 2. Estamos en el estado del arte, no debajo — el go/no-go de Fase 3 es inalcanzable
+
+Nunca habíamos contrastado nuestros números contra la literatura. Al hacerlo:
+
+| | AUC | fuente |
+|---|---|---|
+| PLOS NTD 2023 (mismo ResNet, CODE+SaMi-Trop) | **0,80** (IC 0,79-0,82) | validación |
+| Moody Challenge 2025, 5° de 40 (equipo Ahus AIM) | **0,840** | cross-validation |
+| **DECA, `abl-peso1`, arena A** | **0,838** | validación |
+| DECA, máximo visto (`real30ep`, ép. 9) | 0,847 | validación |
+
+**El piso de 0,93 fijado en Fase 3 para "despliegue completo" no lo alcanza nadie en el campo**, ni siquiera el grupo dueño de los datos. El de 0,85 para "solo priorizador" está justo en el borde de lo que logra el estado del arte mundial. Ambos se escribieron a ciegas (2026-08-08), antes de tener un solo número propio y sin contraste bibliográfico — decisión metodológicamente correcta en su momento (fijar el criterio antes de ver resultados evita moverlo a conveniencia), pero calibrada con información que no teníamos.
+
+**Otros datos del challenge que reencuadran la evaluación:**
+- **La métrica principal del Moody Challenge 2025 NO es AUC**: es TPR a capacidad fija de derivación (cuántos positivos reales capturás dentro de un cupo fijo de gente que podés mandar a serología). Es un primo directo de nuestras bandas de operación de Fase 3, no del AUC.
+- Puntajes absolutos bajos en todo el campo: mejor equipo (Biomed-Cardio) 0,323 en test oculto; mediana de validación 0,279; el 5° puesto sacó 0,269.
+- **La performance cae ~64% de validación a un test externo (ELSA-Brasil)** — el problema de generalización entre poblaciones es del campo entero, no de nuestro pipeline.
+
+**Corolario sobre AUC vs. AUPRC.** Con prevalencia 1,9%, el AUC-ROC *maquilla* el desbalance: el eje FPR = FP/(FP+TN) tiene un TN gigantesco, así que se pueden acumular muchos falsos positivos sin que la curva se mueva. El AUPRC sí se mueve con cada falso positivo, que es el costo real (una serología de más). Ya elegíamos checkpoints por AUPRC (ver "Qué se elige como mejor checkpoint"), pero el go/no-go sigue escrito en AUC — **inconsistencia a resolver al revisar Fase 3**.
+
+### 3. El scheduler de LR venía apagando el entrenamiento solo
+
+`train.py` tenía `ReduceLROnPlateau(mode="max", factor=0.1, patience=3)` **hardcodeado**, y hace `step()` sobre el AUPRC de arena A. Con `patience=3`, tras 4 épocas seguidas sin un nuevo mejor el LR se corta ×10, y puede volver a cortarse cada 4 épocas.
+
+Ahora crucemos eso con el patrón real de las corridas: **el mejor checkpoint siempre cae muy temprano** (época 1, 3 o 4 según la corrida) y después no hay ningún nuevo mejor en las 26-29 épocas restantes. O sea que el scheduler estuvo recortando el LR casi desde el principio: en `real30ep` (mejor en época 3), entre la 7 y la 30 hay margen para ~5-6 reducciones → **LR de 1e-3 a ~1e-9**.
+
+**La huella que lo confirma está en los propios datos de `real30ep`:** de la época 11 a la 30, AUC arena A queda en 0,842-0,843 y AUPRC en 0,164-0,167 — *valores prácticamente idénticos época tras época*. Un modelo que entrena fluctúa; uno con LR ≈ 0 devuelve el mismo número. **Las últimas ~20 épocas de cada corrida larga no estaban entrenando nada.**
+
+Esto reencuadra la conclusión de la sección anterior: donde decíamos "es un techo real del modelo/features", parte de lo que veíamos era **un techo autoinfligido**. No invalida el hallazgo de que ni `peso_strong` ni oversampling mueven la aguja (esas comparaciones son entre sí, con el mismo scheduler), pero sí invalida la lectura de "30 épocas confirman que no hay más para sacar".
+
+**Acción tomada:** se expusieron `--paciencia-lr` (default 3, retrocompatible) y `--factor-lr` (default 0,1) como flags en `train.py`. Se lanzó la corrida `real30ep-paciencialr8` (`peso_strong=1,0`, sin sampler, `--paciencia-lr 8`, 30 épocas) — **quedó corriendo y no se pudo recuperar el resultado**: la máquina de entrenamiento se volvió inalcanzable por red antes de terminar. Verificar `~/DECA-datasets/modelos/real30ep-paciencialr8/historia.json` cuando vuelva.
+
+### 4. Sumar síntomas al target lo empeora — medido, no razonado
+
+Propuesta evaluada: en vez de predecir serología, predecir **los patrones que genera el Chagas** (la idea es que el detector sea de la cardiopatía, no de la infección). Medido sobre los 343.424 registros de CODE-15% con label de Chagas:
+
+| target | prevalencia | P(Chagas \| target) | lift sobre base 1,91% | recall de Chagas+ |
+|---|---|---|---|---|
+| **RBBB solo** | 2,77% | **13,79%** | **7,2×** | 19,97% |
+| unión de anormalidades enriquecidas (RBBB/AF/1dAVb/LBBB/SB) | 8,87% | 6,66% | 3,5× | 30,91% |
+| "ECG no normal" (`normal_ecg` invertido) | 60,87% | 2,63% | 1,4× | 83,75% |
+
+**Cada anormalidad extra sube el recall pero diluye la especificidad más rápido.** AF, LBBB, SB y 1dAVb rondan el 2% de prevalencia en gente sin Chagas, así que la unión se llena de no-Chagas: RBBB solo (enriquecimiento 8,22×) es mejor discriminador que RBBB combinado con las otras cinco. **La versión naive de "detectar los síntomas" es medible y es peor que lo que ya tenemos.**
+
+**Corrección probabilística importante para cómo se presenta el producto:** "quien tenga el patrón probablemente tenga Chagas" **es falso** en población general. P(Chagas | RBBB) = 13,79%, o sea que ~86% de los RBBB no son Chagas (tiene mil causas: isquemia, hipertensión, edad, EPOC). Lo que sí vale, y mucho: pasar de 1,91% a 13,79% es **7,2× de enriquecimiento**, exactamente lo que necesita un embudo que deriva a un test serológico gratuito. Y en el norte argentino endémico ese multiplicador se aplica sobre una prevalencia base más alta — es la "integración con datos epidemiológicos" que el paper de PLOS recomienda explícitamente como trabajo futuro.
+
+**Dato lateral encontrado en el mismo chequeo:** `code15/exams.csv` trae además `age` e `is_male` (y `nn_predicted_age`, `death`, `timey`). **Edad y sexo están disponibles y no los usamos como entrada del modelo.** El paper de PLOS tampoco los usó (solo estratificó post-hoc) — es una palanca sin explorar en el campo. Cautela: las distribuciones etarias difieren por dataset, así que es candidato a atajo de fuente y habría que vigilarlo con el mismo diagnóstico de siempre.
+
+### 5. PTB-XL tiene los 3 patrones objetivo del ROADMAP como etiqueta — y lo estamos descartando
+
+**Corrección de un error propio cometido en esta misma sesión:** se afirmó que HBAI, extrasístoles ventriculares y zonas eléctricamente inactivas "no existen como label en ningún dataset que tengamos". **Es falso.** Se miraron las 7 columnas de CODE-15% y no el vocabulario SCP de PTB-XL, que trae **71 códigos** con anotación clínica validada.
+
+Medido sobre los 21.799 registros de `ptbxl_database.csv`:
+
+| patrón objetivo del ROADMAP | código SCP | registros | % |
+|---|---|---|---|
+| **BRD + HBAI** (el patrón clásico de Chagas) | `CRBBB`/`IRBBB` **+** `LAFB` | **284** | 1,30% |
+| HBAI solo — *la mitad que nos faltaba* | `LAFB` | 1.623 | 7,45% |
+| BRD (completo o incompleto) | `CRBBB`/`IRBBB` | 1.658 | 7,61% |
+| **Extrasístoles ventriculares** | `PVC`/`BIGU`/`TRIGU`/`PRC(S)` | 1.205 | 5,53% |
+| **Aneurisma ventricular** | `ANEUR` ("ST-T changes compatible with ventricular aneurysm") | 104 | 0,48% |
+| Zona eléctricamente inactiva (ampliada) | `ANEUR`/`QWAVE`/infartos localizados | 5.400 | 24,77% |
+| **cualquiera de los 3 patrones** | | **6.242** | **28,63%** |
+
+**Los tres patrones que el ROADMAP nombra como objetivo clínico están disponibles como ground truth, en el dataset que excluimos del entrenamiento por completo** (ver "Tercera pista de fuente", 2026-08-12). PTB-XL está hoy relegado a arena C.
+
+Que sean alemanes y no chagásicos **no importa para este uso**: un BRD+HBAI es un BRD+HBAI sea por Chagas o por isquemia. Sirve como etiqueta *del patrón ECG*, no como label de Chagas — que es justamente lo que falta.
+
+**Tensión a resolver antes de usarlo:** meter PTB-XL al entrenamiento reabre el riesgo de atajo de fuente que motivó excluirlo. La mitigación plausible es que alimente **solo las cabezas de patrón**, con la de Chagas enmascarada (mismo mecanismo que ya usa RBBB), de modo que la cabeza de Chagas nunca reciba gradiente que diga "PTB-XL → negativo". El riesgo residual es que el cuerpo compartido codifique el origen igual. **No está resuelto — se decide con el diagnóstico de atajo midiendo, no a priori.**
+
+**Otro dato de `ptbxl_database.csv` sin explotar:** trae anotaciones de calidad de señal por registro (`baseline_drift`, `static_noise`, `burst_noise`, `electrodes_problems`, `extra_beats`, `pacemaker`) más `device` y `site`. Sirve para filtrado de calidad y, potencialmente, para atacar de frente la pista espectral de fuente (`device` permitiría medir cuánto de la separabilidad es equipamiento).
+
+### 6. Datasets externos: qué conviene y qué no existe
+
+**[PhysioNet/CinC Challenge 2021](https://physionet.org/content/challenge-2021/1.0.3/) — el recomendado.** ~88.000 ECG públicos, 30 clases SNOMED puntuadas, **12,6 GB**, WFDB (`.mat`+`.hea`) con el diagnóstico en el campo `#Dx:` del header, licencia CC-BY 4.0 **abierta** (sin credencial).
+
+El argumento a favor no es solo volumen: **ataca el atajo de fuente por construcción.** Hoy la fuente es proxy de la etiqueta (SaMi-Trop=100% positivo, PTB-XL=100% negativo). Con 6 fuentes más, todas enmascaradas para la cabeza de Chagas pero ricas en etiquetas de patrón, "de qué dataset viene esto" deja de predecir la etiqueta.
+
+**Inventario real de lo que agrega** (fuentes públicas: CPSC 6.877, CPSC-Extra 3.453, INCART 74, PTB/PTB-XL 21.837, Georgia 10.344, Chapman-Shaoxing 10.247, Ningbo 34.905). Como **PTB-XL ya lo tenemos**, el aporte neto es ~66.000 registros; descontándolo, en nuestros patrones objetivo:
+
+| patrón | clase | total | ya tenemos | **nuevo** |
+|---|---|---|---|---|
+| BRD (todas las variantes) | `CRBBB`/`IRBBB`/`RBBB` | 6.687 | 1.660 | **~5.027** |
+| **HBAI** — *el label escaso* | `LAnFB` | 2.186 | 1.626 | **560** |
+| Extrasístoles ventriculares | `PVC`/`VPB` | 1.938 | 0 en este mapeo | **1.938** |
+| Onda Q anormal | `QAb` | 2.076 | 548 | **1.528** |
+| Mala progresión de onda R | `PRWP` | 638 | 0 | **638** (patrón nuevo) |
+
+**El cuello de botella sigue siendo HBAI**: apenas +560, y el patrón clásico requiere BRD **+** HBAI simultáneos (en PTB-XL esa coocurrencia son 284 registros). Descargar Challenge 2021 no resuelve la escasez del patrón más específico, aunque sí multiplica todo lo demás.
+
+**Fricciones concretas a resolver:** (a) WFDB = ~176.000 archivos chicos, justo lo que el SSD exFAT hace mal — mitigación: son 12,6 GB, se descomprime en disco interno, se convierte a HDF5 replicando `convert_ptbxl.py` y recién ahí se mueve; (b) duraciones de 5 a 144 s, las de <7,0 s las descarta la Fase 2 tal cual está, e INCART (74 registros, 257 Hz, 30 min) conviene descartarlo entero; (c) las etiquetas son SNOMED-CT dentro del header, hace falta un parser más el mapeo de [`dx_mapping_scored.csv`](https://github.com/physionetchallenges/evaluation-2021).
+
+**Espacio disponible medido (2026-08-26):** SSD `D:` con **771,9 GB libres** de 931,5; disco interno `C:` con 116,6 GB libres. El espacio no es restricción para ninguno de los dos datasets.
+
+**[MIMIC-IV-ECG](https://physionet.org/content/mimic-iv-ecg/1.0/) — la receta del top-5.** ~800.000 ECG de ~160.000 pacientes, **90,4 GB**, 10 s a 500 Hz, WFDB. Trae mediciones automáticas (intervalo RR, inicio/fin de QRS) y ~600.000 informes de cardiólogo en texto libre (vía MIMIC-IV-Note). El equipo Ahus AIM (5° de 40) preentrenó el extractor de features para predecir **biomarcadores de sangre discretizados por percentiles** y recién después hizo fine-tuning a Chagas, con ensemble de 5 modelos.
+
+**Corrección sobre el acceso:** en esta misma sesión se afirmó que requiere credencial de PhysioNet con curso CITI. **Es falso** — el proyecto pasó a acceso abierto (ODbL v1.0). El obstáculo real no es el acceso sino que las etiquetas son texto libre, y por eso el equipo del top-5 preentrenó contra biomarcadores en vez de contra diagnósticos.
+
+**Lo que NO existe: no hay ningún dataset público de ECG con Chagas de Argentina ni de otro país endémico** más allá de los tres que ya tenemos. Los datasets extra de zonas endémicas del Moody Challenge son privados/ocultos, y REDS-II y ELSA-Brasil son cohortes de estudio, no descargas públicas. **El riesgo transversal del ROADMAP ("dependencia de un solo dominio geográfico") no se resuelve con datos públicos** — se resuelve consiguiendo datos locales, que es gestión institucional, no trabajo técnico.
+
+### 7. Diferencias concretas contra la implementación de referencia
+
+Del repo oficial del paper ([carji475/ecg-chagas](https://github.com/carji475/ecg-chagas)) y su sección de métodos, contra lo nuestro:
+
+| | PLOS NTD 2023 | DECA |
+|---|---|---|
+| dropout | **0,5** | 0,2 (`train.py:181`) |
+| weight decay | **0,001** | **ninguno** (`Adam` sin `weight_decay`, `train.py:237`) |
+| batch | 32 | 128 |
+| ensemble | **15 modelos, distintas semillas** | 1 modelo |
+| early stopping | val loss | AUPRC arena A |
+| ventana | 4.096 muestras @400 Hz, **rellenada con ceros** | 2.800 @400 Hz, **descarta** (Fase 2) |
+| edad/sexo como entrada | no | no |
+
+Dos observaciones:
+- **Estamos regularizando bastante menos que la referencia** (dropout 0,2 vs 0,5, sin weight decay) en una tarea donde el overfitting aparece rápido — consistente con la loss que se desploma en la ablación de sampler.
+- **El ensemble nunca se probó y es la ganancia más barata disponible.** El paper usó 15 modelos; el 5° puesto del challenge usó 5. Nosotros corrimos siempre 1 — y ya hay **5 modelos entrenados** en `~/DECA-datasets/modelos/` (`abl-peso1`, `abl-peso1-seed123`, `real30ep`, `real8ep`, `abl-peso5`). Promediar sus logits y evaluar arena A **no cuesta ni una época de GPU**.
+
+### Qué queda pendiente de esta sesión
+
+Ordenado por relación impacto/costo:
+
+1. **Ensamblar los 5 checkpoints existentes** y medir arena A. Costo cero de entrenamiento, nunca probado.
+2. **Recuperar el resultado de `real30ep-paciencialr8`** (hallazgo 3) — es la prueba de si el techo de 0,84 era del scheduler o real.
+3. **Expandir las cabezas auxiliares** de 1 (RBBB) a los 3 patrones del ROADMAP usando los códigos SCP de PTB-XL (hallazgo 5), con la cabeza de Chagas enmascarada y vigilando el diagnóstico de atajo. Da supervisión densa alineada al objetivo clínico real *y* la explicabilidad que el ROADMAP promete ("se deriva porque hay BRD+HBAI") y hoy no entregamos.
+4. **Igualar la regularización de la referencia** (dropout 0,5, weight decay 1e-3): una corrida.
+5. **Revisar el go/no-go de Fase 3** a la luz del hallazgo 2: los umbrales están fuera del alcance del estado del arte, y están expresados en AUC cuando la decisión real se toma sobre AUPRC/punto de operación. **Requiere decisión del usuario, no se cambia unilateralmente** — un criterio prefijado que se ajusta después de ver resultados pierde su función, así que el cambio tiene que ser explícito, argumentado y fechado.
+6. Evaluar la descarga de Challenge 2021 (hallazgo 6), previo chequeo de espacio en el SSD.
 
 ---
 
