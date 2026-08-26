@@ -198,6 +198,10 @@ def main():
                    help="ruta a un checkpoint .pt (mejor.pt o ultimo.pt) desde donde continuar")
     p.add_argument("--paciencia-atajo", type=int, default=2,
                    help="cortar tras N epocas seguidas sin mejora Y con atajo de fuente positivo (0 = desactivado)")
+    p.add_argument("--paciencia-lr", type=int, default=3,
+                   help="ReduceLROnPlateau: epocas sin nuevo mejor AUPRC arena A antes de bajar el LR")
+    p.add_argument("--factor-lr", type=float, default=0.1,
+                   help="ReduceLROnPlateau: factor de reduccion del LR al disparar")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -231,7 +235,9 @@ def main():
     loss_chagas = nn.BCEWithLogitsLoss(reduction="none", pos_weight=torch.tensor(pw_chagas, device=device))
     loss_rbbb = nn.BCEWithLogitsLoss(reduction="none", pos_weight=torch.tensor(pw_rbbb, device=device))
     optimizador = torch.optim.Adam(modelo.parameters(), lr=args.lr)
-    planificador = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizador, mode="max", factor=0.1, patience=3)
+    planificador = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizador, mode="max", factor=args.factor_lr, patience=args.paciencia_lr
+    )
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
 
     epoca_inicio, mejor_auprc, epocas_atajo_seguidas = 1, -1.0, 0

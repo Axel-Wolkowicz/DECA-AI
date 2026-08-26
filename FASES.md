@@ -1,6 +1,6 @@
 # IA — Fases del proyecto y dificultades
 
-Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). **Fase 1 completa** (las 4 tareas de EDA cubiertas por notebooks reproducibles en `notebooks/`); la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). **Fase 2 completa (2026-08-10)**: diseño corregido y código implementado (`src/split_patients.py`, `src/preprocess.py`), corrido sobre el corpus completo: 362.363 registros preprocesados en `fase2_preprocessed.hdf5`, con el split por paciente verificado sin fuga. **Fase 4 en progreso (arrancada 2026-08-12)**: pipeline de entrenamiento implementado y validado de punta a punta (`src/dataset.py`, `src/model.py`, `src/evaluar.py`, `src/train.py`), corre en Windows y Linux; primera corrida real de 1 época sobre el dataset completo dio AUC 0,80 en la arena de go/no-go, con el diagnóstico de atajo de fuente en la dirección correcta. Falta correr más épocas y las ablaciones antes de llegar al criterio de despliegue.
+Este documento complementa a [ROADMAP.md](ROADMAP.md): mientras el roadmap define el **qué** (contexto, objetivo, datasets), acá se define el **cómo y en qué orden**, fase por fase, junto con las dificultades esperadas en cada una. Estado actual: **Fase 0 completa y verificada** (los 3 datasets descargados, unificados en HDF5, consolidados en `metadata.parquet` y validados por round-trip). **Fase 1 completa** (las 4 tareas de EDA cubiertas por notebooks reproducibles en `notebooks/`); la **Fase 3 quedó cerrada** (4 decisiones tomadas el 2026-08-08, punto de operación en 95% de sensibilidad con tres bandas y go/no-go escrito antes de entrenar). **Fase 2 completa (2026-08-10)**: diseño corregido y código implementado (`src/split_patients.py`, `src/preprocess.py`), corrido sobre el corpus completo: 362.363 registros preprocesados en `fase2_preprocessed.hdf5`, con el split por paciente verificado sin fuga. **Fase 4 en progreso (arrancada 2026-08-12)**: pipeline de entrenamiento implementado y validado de punta a punta (`src/dataset.py`, `src/model.py`, `src/evaluar.py`, `src/train.py`), corre en Windows y Linux; primera corrida real de 1 época sobre el dataset completo dio AUC 0,80 en la arena de go/no-go, con el diagnóstico de atajo de fuente en la dirección correcta. **Corrida larga de 30 épocas completada (2026-08-25, `real30ep`): AUC arena A converge a ~0,843 y no mejora más — NO-GO contra el criterio de Fase 3 (piso 0,85), y por debajo del mejor modelo hasta ahora (`abl-peso1`, AUPRC 0,1755 vs. 0,1705).** **Ablación de oversampling completada (2026-08-26, `real30ep-sampler`): peor que `abl-peso1`, no rompe el techo.** `peso_strong=1,0` (`abl-peso1`) sigue siendo el mejor modelo global; ninguna de las dos rutas propuestas para el desbalance (subir peso, oversampling) supera el techo de AUC ~0,84.
 
 Convención de estado: 🔲 no iniciada · 🟡 en progreso · ✅ completa.
 
@@ -539,6 +539,86 @@ Mejor AUPRC arena A: 0.1654 (vs. 0.1755 de la corrida original `peso_strong=1,0`
 Esto separa las dos partes de la hipótesis original: la coincidencia de fase ("se estanca cada ~2 épocas") es estructural y se explica por la dinámica de optimización en sí (plausible: el scheduler y la superficie de loss producen mesetas periódicas independientemente de la semilla). Pero si en esa meseta el modelo específicamente cae en el atajo de fuente es sensible a la inicialización — no hay una fuerza determinística empujándolo ahí, es más cerca de un roce que de una atracción. Con una sola semilla adicional no se puede descartar del todo (podría cruzar 1 de cada 2-3 semillas), pero baja bastante la urgencia: no parece ser el tipo de problema estructural que garantiza que una corrida larga termine explotando el atajo.
 
 **Implicancia práctica:** con `--paciencia-atajo 2` activo por default, una corrida larga real está protegida igual — si cruza en una meseta de 2 épocas, corta sola; si no cruza (como esta corrida), sigue de largo. Con esto ya se puede considerar habilitada una corrida más larga (sujeto a decisión del usuario), aunque seguiría siendo valioso en algún momento correr una tercera semilla para tener más que 2 puntos de dato.
+
+### Corrida larga de 30 épocas (`real30ep`, 2026-08-25): confirma la meseta, no supera al mejor modelo
+
+Corrida pendiente habilitada por la sección anterior: dataset completo, `peso_strong=3,0` (default), 30 épocas, sin cortar por `--paciencia-atajo`. Corrida en la máquina de entrenamiento (RTX 4080 SUPER, no la 4090 mencionada en SETUP.md — batch ajustado a 128 por los 16 GB de VRAM en vez de 256). Los datos se copiaron del SSD externo al disco interno (`~/DECA-datasets`, ~47 GB: solo `fase2_preprocessed.hdf5`, `fase2_metadata.parquet`, `code15/exams.csv` y `modelos/` — los HDF5 crudos de code15 no hacen falta para entrenar, ya está todo fusionado en la fase 2) para poder desconectar el SSD sin cortar el entrenamiento.
+
+```
+| ep | loss chagas (train) | AUC arena A | AUPRC arena A | delta atajo | AUPRC RBBB |
+|---|---|---|---|---|---|
+| 1  | 1.2071 | 0.8285 | 0.1302 | -0.0578 | 0.7784 |
+| 2  | 1.0782 | 0.8258 | 0.1378 | -0.0320 | 0.7946 |
+| 3  | 1.0294 | 0.8349 | 0.1705 | -0.0157 | 0.7911 |  <- nuevo mejor (queda como mejor.pt)
+| 4  | 1.0097 | 0.8398 | 0.1549 | -0.0086 | 0.7973 |
+| 5  | 0.9905 | 0.8404 | 0.1433 | -0.0083 | 0.8015 |
+| 6  | 0.9791 | 0.8357 | 0.1567 | +0.0009 | 0.7823 |  <- unico cruce del atajo, aislado, sin repetirse
+| 7  | 0.9805 | 0.8410 | 0.1500 | -0.0019 | 0.7862 |
+| 8  | 0.9108 | 0.8457 | 0.1645 | -0.0082 | 0.7919 |
+| 9  | 0.8966 | 0.8465 | 0.1563 | -0.0093 | 0.7908 |  <- maximo AUC de toda la corrida
+| 10 | 0.8901 | 0.8464 | 0.1673 | -0.0105 | 0.7889 |
+| 11-30 | ~0.85-0.88 | 0.842-0.843 (estable) | 0.164-0.167 (estable) | -0.010 a -0.011 (estable) | 0.784-0.785 (estable) |
+```
+
+Historial completo por época en `~/DECA-datasets/modelos/real30ep/historia.json`.
+
+**Lectura:**
+
+- **La meseta que ya se veía en la corrida de 8 épocas se confirma con datos hasta la época 30**: AUC arena A converge a ~0,843 desde la época ~8 y no se mueve más en las 22 épocas restantes. No era falta de entrenamiento — era un techo real del modelo/features actuales.
+- **Sin atajo de fuente sostenido**: el delta cruzó a positivo una sola vez (época 6, +0,0009, ínfimo) y no se repitió — coherente con lo que predecía la sección anterior sobre `--paciencia-atajo 2`, que no tuvo que activarse.
+- **El mejor checkpoint (por AUPRC, criterio de selección de Fase 4) quedó en la época 3: AUPRC 0,1705, AUC 0,8349.** No es el máximo AUC de la corrida (0,8465 en la época 9) porque se selecciona por AUPRC, no por AUC.
+- **No supera al mejor modelo hasta ahora.** Comparando AUPRC arena A entre todas las corridas guardadas en `~/DECA-datasets/modelos/`:
+
+  | corrida | hiperparámetro relevante | AUPRC (mejor.pt) | AUC (misma época) | max AUC visto |
+  |---|---|---|---|---|
+  | **`abl-peso1`** | `peso_strong=1,0`, 8 ép. | **0,1755** | 0,8378 | 0,8428 |
+  | `real30ep` | `peso_strong=3,0`, 30 ép. | 0,1705 | 0,8349 | 0,8465 |
+  | `abl-peso1-seed123` | `peso_strong=1,0`, seed 123 | 0,1654 | 0,8395 | 0,8422 |
+  | `real8ep` | `peso_strong=3,0`, 8 ép. cortada | 0,1500 | 0,8397 | 0,8402 |
+  | `abl-peso5` | `peso_strong=5,0`, 8 ép. | 0,1460 | 0,8310 | 0,8413 |
+
+  `abl-peso1` sigue siendo el mejor modelo global. 30 épocas con el `peso_strong` default (3,0) no superaron a 8 épocas con `peso_strong=1,0` — otra pista de que lo que mueve la aguja es ese hiperparámetro, no la cantidad de épocas.
+
+- **Contra el criterio de go/no-go fijado en Fase 3 (AUC ≥0,93 despliegue completo / 0,85-0,93 solo priorizador / <0,85 no se usa): esta corrida da NO-GO.** Ni el checkpoint guardado (AUC 0,8349) ni el máximo AUC visto en toda la corrida (0,8465) llegan al piso de 0,85 — no califica ni para el uso limitado como priorizador.
+
+**Pendiente:** correr la ablación `--sampler balanceado` (todavía no probada) y, dado que `peso_strong=1,0` viene ganando en las tres corridas que lo probaron, considerarlo el nuevo default candidato en vez de 3,0.
+
+### Ablación `--sampler balanceado` (`real30ep-sampler`, 2026-08-26): overfitting rápido, pierde contra `abl-peso1`
+
+Corrida pendiente de la sección anterior: dataset completo, `peso_strong=1,0` (default del código, `dataset.py:57`), 30 épocas, `--sampler balanceado`, `--batch 128`, sin `--paciencia-atajo` disparada. Con el sampler, `pos_weight` de Chagas se apaga (queda en 1,0) para no apilar los dos mecanismos de corrección de desbalance, tal como documenta `train.py`.
+
+**Terminó en ~27 minutos — mucho más rápido que las ~2,5h de las corridas sin sampler**, pese a usar el mismo `num_samples=len(train)` (238.027) por época. La causa más probable: `WeightedRandomSampler` con reemplazo le da a cada clase la mitad de la masa de probabilidad, y con solo ~5.657 positivos totales (4.574 code15 + 1.083 samitrop) contra 233.453 negativos, la mitad "positiva" de cada batch sale una y otra vez del mismo pool chico — mejor localidad de cache de disco que el barrido aleatorio sobre el dataset completo que hacen las corridas sin sampler.
+
+```
+| ep | loss chagas (train) | AUC arena A | AUPRC arena A | delta atajo |
+|---|---|---|---|---|
+| 1  | 0.5362 | 0.8365 | 0.1626 | -0.0135 |  <- mejor.pt (mejor de toda la corrida)
+| 2  | 0.4563 | 0.8196 | 0.1525 | -0.0047 |
+| 3  | 0.3027 | 0.8166 | 0.1499 | -0.0036 |
+| 4  | 0.1786 | 0.7976 | 0.1241 | +0.0009 |  <- unico cruce del atajo, aislado
+| 5  | 0.1215 | 0.8106 | 0.1532 | -0.0027 |
+| 6  | 0.0734 | 0.8074 | 0.1509 | -0.0005 |
+| 10 | 0.0359 | 0.8086 | 0.1514 | -0.0005 |
+| 20 | 0.0316 | 0.8093 | 0.1541 | -0.0005 |
+| 30 | 0.0322 | 0.8092 | 0.1527 | -0.0007 |
+```
+
+Historial completo en `~/DECA-datasets/modelos/real30ep-sampler/historia.json`.
+
+**Lectura:**
+
+- **La loss de train se hunde a casi cero en ~10 épocas** (0,54 → 0,03) y se queda ahí planchada las 20 épocas restantes — la firma clásica de memorización que ya se había anotado como riesgo antes de correr esto: repetir un pool chico de positivos (~5.657 registros) muchas veces por época en vez de verlos una sola vez con `pos_weight`.
+- **El mejor resultado de toda la corrida fue la época 1**, antes de que el overfitting pegara fuerte (AUC 0,8365, AUPRC 0,1626). Después de eso el modelo se estabiliza en un piso más bajo (AUC ~0,808-0,810, AUPRC ~0,153) y no vuelve a mejorar en 29 épocas.
+- **Sin atajo de fuente sostenido** (un solo cruce aislado en la época 4, +0,0009, no se repite) — el oversampling no empeoró ese diagnóstico, pero tampoco lo mejoró.
+- **Pierde contra el mejor modelo actual:**
+
+  | corrida | AUPRC (mejor.pt) | AUC (misma época) |
+  |---|---|---|
+  | **`abl-peso1`** (peso_strong=1,0, sin sampler, 8 ép.) | **0,1755** | 0,8378 |
+  | `real30ep` (peso_strong=3,0, sin sampler, 30 ép.) | 0,1705 | 0,8349 |
+  | `real30ep-sampler` (peso_strong=1,0, con sampler, 30 ép.) | 0,1626 | 0,8365 |
+
+**Conclusión: ninguna de las dos rutas para el desbalance de clases (subir `peso_strong`, oversampling) mueve el techo de AUC ~0,84 en arena A.** `abl-peso1` (peso_strong=1,0, sin oversampling) sigue siendo el mejor modelo de todas las corridas hechas hasta ahora, y sigue sin cruzar el piso de 0,85 de Fase 3. El cuello de botella no parece ser el manejo del desbalance — es capacidad del modelo o de las features, tema para la próxima sección de trabajo.
 
 ---
 
