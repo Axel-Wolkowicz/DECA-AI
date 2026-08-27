@@ -57,7 +57,7 @@ Ninguno tiene etiqueta de Chagas: **aportan etiqueta de los patrones ECG objetiv
 
 | Dataset | Tamaño | Registros | Formato | Acceso | Para qué sirve |
 |---|---|---|---|---|---|
-| [**Challenge 2021**](https://physionet.org/content/challenge-2021/1.0.3/) | **12,6 GB** | ~88.000 públicos (6 fuentes) | WFDB (`.mat`+`.hea`), SNOMED-CT en el campo `#Dx:` | **Abierto**, CC-BY 4.0 | Etiquetas de los 3 patrones objetivo en 6 poblaciones distintas (EE.UU., China, Alemania) |
+| [**Challenge 2021**](https://physionet.org/content/challenge-2021/1.0.3/) | **12,6 GB** | ~62.879 públicos (5 fuentes — ver corrección abajo) | WFDB (`.mat`+`.hea`), SNOMED-CT en el campo `#Dx:` | **Abierto**, CC-BY 4.0 | Etiquetas de los 3 patrones objetivo en poblaciones de EE.UU. y China |
 | [**MIMIC-IV-ECG**](https://physionet.org/content/mimic-iv-ecg/1.0/) | 90,4 GB | ~800.000 (≈160.000 pacientes) | WFDB (`.dat`+`.hea`) | **Abierto**, ODbL v1.0 | Preentrenamiento auto-supervisado / por biomarcadores (receta del 5° puesto del Moody 2025) |
 
 **Challenge 2021 — composición y qué agrega realmente.** Sus fuentes públicas son CPSC (6.877), CPSC-Extra (3.453), INCART (74), PTB/PTB-XL (21.837), Georgia (10.344), Chapman-Shaoxing (10.247) y Ningbo (34.905). **PTB-XL ya lo tenemos**, así que el aporte neto es ~66.000 registros nuevos. Descontando PTB-XL, lo que suma en nuestros patrones objetivo:
@@ -71,6 +71,8 @@ Ninguno tiene etiqueta de Chagas: **aportan etiqueta de los patrones ECG objetiv
 | Mala progresión de onda R | `PRWP` (365413008) | 638 | 0 | **638** (patrón nuevo) |
 
 **El cuello de botella es HBAI**: solo suma 560 registros nuevos, y el patrón clásico de Chagas es BRD **+** HBAI *en simultáneo*. La coocurrencia va a seguir siendo escasa (en PTB-XL son 284).
+
+**Corrección (2026-08-26/27, ver FASES.md): la tabla de arriba está mal en su composición.** El manifiesto real de Challenge 2021 v1.0.3 (`SHA256SUMS.txt`) **no incluye INCART ni PTB/PTB-XL** bajo `training/`. Son 5 fuentes, no 7: chapman_shaoxing (~10.252 registros), cpsc_2018 (~6.881), cpsc_2018_extra (~3.455), georgia (~10.349), ningbo (~31.940) — **~62.879 registros en total**, no ~88.000, y **no hay PTB-XL que descontar** (nunca estuvo, así que tampoco hay "aporte neto" que restarle — todo lo que traiga es nuevo). La columna "nuevo" de la tabla de patrones quedó calculada sobre una composición que no es la real; se recalcula con los conteos verdaderos de `challenge2021_labels.csv` una vez terminada la conversión (`src/convert_challenge2021.py`, ya escrito y probado).
 
 **A qué nos enfrentamos si lo incorporamos:**
 - **Formato WFDB = ~176.000 archivos chicos.** Es exactamente lo que el SSD exFAT hace mal (misma razón por la que PTB-XL se convirtió a HDF5). Mitigación: son solo 12,6 GB — descomprimir en disco interno, convertir a HDF5 y recién ahí mover, replicando `convert_ptbxl.py`.

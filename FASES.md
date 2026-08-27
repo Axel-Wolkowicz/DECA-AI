@@ -779,6 +779,73 @@ Ordenado por relación impacto/costo:
 
 ---
 
+## Sesión del 2026-08-26/27 (noche) — descarga y conversión de Challenge 2021
+
+Ejecutada en modo autónomo (Axel durmiendo, sin commits). Cubre la acción concreta del punto 6 de arriba: bajar Challenge 2021 al SSD y dejarlo en un HDF5 unificado, listo para una futura integración a Fase 4.
+
+### Corrección sobre el hallazgo 6: INCART y PTB/PTB-XL no están en el dataset real
+
+La sesión del 2026-08-26 (hallazgo 6, tabla de composición) listaba INCART (74 registros) y PTB/PTB-XL (21.837) entre las fuentes públicas de Challenge 2021. **Es incorrecto.** El manifiesto real (`SHA256SUMS.txt` de la v1.0.3, 125.820 líneas) no trae ninguna carpeta `training/incart/`, `training/ptb/` ni `training/ptb-xl/`. Las únicas 5 fuentes bajo `training/` son:
+
+| fuente | archivos (.hea+.mat) | registros (÷2) |
+|---|---|---|
+| chapman_shaoxing | 20.505 | ~10.252 |
+| cpsc_2018 | 13.762 | ~6.881 |
+| cpsc_2018_extra | 6.910 | ~3.455 |
+| georgia | 20.699 | ~10.349 |
+| ningbo | 63.881 | ~31.940 |
+| **total** | **125.758** | **~62.879** |
+
+Consecuencia práctica: no hizo falta descartar INCART a mano ni deduplicar contra el PTB-XL que ya tenemos — ninguno de los dos estaba en el dataset para empezar. Los números de "aporte neto" de la tabla de ROADMAP.md (que restaban PTB-XL) hay que releerlos con esto en mente; quedan pendientes de recalcular sobre los datos reales (ver más abajo).
+
+### Descarga: de 273 a 366 archivos/min optimizando conexión, no concurrencia
+
+Axel pidió explícitamente que la descarga fuera directo al SSD (`D:\DECA-datasets\challenge2021`), no a disco interno primero: la notebook no se iba a usar al día siguiente y el destino final es el SSD portable.
+
+Primer intento (`requests.get()` de módulo, sin reuso de conexión): 12 threads dieron 273 archivos/min; subir a 40 threads lo **empeoró** a 193/min (más threads sin pooling = más contención de handshakes TLS nuevos, no más throughput). Fix real: `requests.Session()` compartida + `HTTPAdapter(pool_connections=N, pool_maxsize=N)`. Con eso, 20 threads dieron 366/min (+34% sobre el mejor intento anterior), y subir a 48 threads volvió a empeorar (345/min) — **el techo de concurrencia útil está en ~20**, sin errores de servidor visibles, así que es saturación de enlace o del lado de PhysioNet, no un bug local.
+
+Comparación pedida por Axel (bajar a disco interno primero vs. directo al SSD): **prácticamente igual** (368/min en `C:` vs. 366/min en `D:`) — a ~6 archivos/seg exFAT no es el cuello de botella, la latencia de red domina en los dos casos. Se descartó el paso extra de "bajar y mover".
+
+Config final: `src/../scratchpad/download_challenge2021.py` (script de descarga, no vive en el repo — es de un solo uso), `Session` compartida, 20 workers, manifiesto = `SHA256SUMS.txt` filtrado a `training/`. Log en el mismo scratchpad de la sesión.
+
+### Conversor: `src/convert_challenge2021.py`
+
+Nuevo módulo, análogo a `convert_ptbxl.py` pero con parseo de diagnóstico SNOMED-CT en vez de asumir una etiqueta ya provista. Decisiones de diseño:
+
+- **Frecuencia y ventana: 500 Hz / 5.000 muestras, igual convención que `ptbxl.hdf5`** (no la duración nativa de cada registro, que varía: la mayoría de las 5 fuentes son 10 s nativos, pero CPSC/CPSC-Extra van de ~6 a ~60 s). Los registros más largos se recortan **centrados** a 5.000 muestras; los más cortos se rellenan con cero al final. Es un recorte sin pérdida para el pipeline tal como está hoy: Fase 2 (`preprocess.py`) también recorta centrado (a 7,0 s) y descarta el padding de ceros antes de usar la señal, así que el centro que termina viendo Fase 2 es el mismo que vería si se le diera el registro nativo completo — recortar centrado en la conversión no cambia el resultado final, solo ahorra espacio.
+- **Mapeo SNOMED → patrón**, subconjunto de `dx_mapping_scored.csv` (repo `physionetchallenges/evaluation-2021`, no versionado en el repo — son 8 códigos, quedaron hardcodeados en el módulo con cita a la fuente): BRD = {CRBBB 713427006, RBBB 59118001, IRBBB 713426002}, HBAI = {LAnFB 445118002}, PVC = {PVC 427172004, VPB 17338001}, QAb = {164917005}, PRWP = {365413008}. Las equivalencias (CRBBB≡RBBB, PVC≡VPB) son las que el propio challenge puntúa como el mismo hallazgo clínico.
+- **No toca `metadata.parquet` ni `build_metadata.py`.** Escribe su propio `challenge2021_labels.csv` (análogo a `exams.csv`/`ptbxl_database.csv` por fuente) más `challenge2021.hdf5`. Integrarlo al `metadata.parquet` consolidado y a Fase 4 es la decisión de arquitectura pendiente (ver "Qué falta" más abajo).
+
+**Prueba de humo** (contra los ~4.300 registros de `chapman_shaoxing` ya descargados en ese momento): 4.286/4.306 convertidos, 20 salteados por `FileNotFoundError` (pares .hea/.mat todavía incompletos por la descarga en curso, no un bug — se resuelven solos en la corrida final). Validación cruzada contra la tabla oficial: `hbai=0` y `prwp=0` en chapman_shaoxing coinciden **exactamente** con las columnas `Chapman_Shaoxing` de `dx_mapping_scored.csv` (esa fuente tiene 0 casos anotados de esos dos patrones específicamente) — confirma que el parseo de SNOMED y el mapeo están bien. Señal en rango físico correcto (mV, std ~0,3), shape (5.000, 12), sin nulos inesperados en ningún campo del CSV. Se borraron los artefactos de la prueba antes de la corrida final.
+
+### Qué falta (decisión de Axel, no se improvisa de noche)
+
+**Integrar Challenge 2021 a Fase 4 requiere más que repetir el mecanismo de RBBB.** Repasando `train.py`: hoy la cabeza de Chagas **no tiene máscara** — `l_chagas = (loss_chagas(...) * peso).sum() / peso.sum()`, sin factor de máscara, porque hasta ahora los tres datasets siempre traen `chagas_label` concreto (True/False). Sumar Challenge 2021 como supervisión auxiliar (que es todo el punto: atacar el atajo de fuente agregando orígenes sin etiqueta de Chagas) obliga a **introducir por primera vez un `chagas_mask`** — no solo copiar el patrón de `rbbb_mask` a las cabezas nuevas. Eso toca `model.py` (cabezas nuevas), `dataset.py` (merge de `challenge2021_labels.csv` + máscara de Chagas) y `train.py` (término de loss nuevo por cabeza). Es exactamente lo que FASES.md ya marcaba como "no resuelto, se decide midiendo" (punto 3 de la lista de pendientes, arriba) — no es una tarea mecánica de una noche, y tocar la arquitectura del modelo sin que Axel lo revise despierto no correspondía al pedido de dejar "el SSD listo en formato correcto".
+
+Pendiente para cuando Axel decida encararlo:
+1. Agregar `chagas_mask` (hoy inexistente) antes de poder sumar cualquier fuente sin label de Chagas.
+2. Elegir cuántas cabezas nuevas (¿una por patrón, o BRD+HBAI combinado ya que es el patrón clínico que importa?) y su peso en la loss total.
+3. Correr el diagnóstico de atajo de fuente con Challenge 2021 adentro antes de confiar en cualquier mejora — es el mismo riesgo que motivó excluir PTB-XL originalmente, ahora con 5 orígenes nuevos en vez de 1.
+4. Recalcular la tabla de "aporte neto" de ROADMAP.md con los conteos reales de `challenge2021_labels.csv` (la tabla actual asumía PTB-XL adentro del dataset, que resultó no estar).
+
+### Estado al cortar la sesión (2026-08-27, madrugada) — qué falta
+
+**Descarga: 100% completa y verificada.** 125.757/125.758 archivos en `D:\DECA-datasets\challenge2021\training\` (el único que falta, `training/ningb`, es una línea corrupta del manifiesto de PhysioNet — no es un archivo real, nunca va a existir). Desglose por fuente: chapman_shaoxing 20.505, cpsc_2018 13.762, cpsc_2018_extra 6.910, georgia 20.699, ningbo 63.881 archivos (.hea+.mat). 62.846 `.hea` vs 62.845 `.mat` (1 registro con par incompleto, ruido esperado — el conversor lo salta solo).
+
+**Conversión: escrita y validada por prueba de humo, pero la corrida completa NO terminó.** Se intentó dos veces:
+1. Primera vez, corriendo como task en background de la sesión de Claude Code: se cortó sola sin completar ni el 1% — la sesión se reinició (reconexión) y mató el proceso, que no sobrevive a eso.
+2. Segunda vez, lanzada como proceso de Windows desatado de la sesión (`Start-Process` de PowerShell, para que sobreviva a un reinicio de sesión): Axel avisó que se iba a otra compu con el SSD en 10 minutos, así que se cortó a propósito para no dejar el HDF5 a medio escribir mientras se desconecta el disco. **Se limpiaron los archivos parciales** (`challenge2021.hdf5.tmp`) — no quedó nada corrupto ni a medias en el SSD.
+
+**Para retomar (en esta compu o en otra con el SSD conectado):**
+```
+python src/convert_challenge2021.py
+```
+Tarda ~55 minutos (~19 registros/seg, medido). No necesita red — todo el trabajo es local (leer WFDB de `training/`, escribir `challenge2021.hdf5` + `challenge2021_labels.csv`). Requiere el mismo entorno que el resto del repo (`h5py`, `wfdb`, `pandas`, `numpy`, `tqdm` — ya en `requirements.txt`/`.venv`). Si se corta a la mitad, borrar `challenge2021.hdf5.tmp` antes de re-correr (el script no pisa un `.hdf5` final que ya exista, pero tampoco retoma un `.tmp` parcial — arranca de cero).
+
+Una vez que termine, falta: (a) completar esta sección con los números reales de conteo por patrón (hoy son solo la muestra de humo sobre chapman_shaoxing), (b) recalcular la tabla de ROADMAP.md con los conteos reales, (c) la decisión de arquitectura para integrarlo a Fase 4 (sección de arriba, "Qué falta" — sigue sin resolver).
+
+---
+
 ## Fase 5 — Validación y evaluación 🔲
 
 **Tareas:**

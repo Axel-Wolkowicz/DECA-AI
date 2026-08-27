@@ -125,6 +125,15 @@ SAMITROP_HDF5 = SAMITROP_DIR / "exams.hdf5"
 PTBXL_DATABASE_CSV = PTBXL_DIR / "ptbxl_database.csv"
 PTBXL_HDF5 = PTBXL_DIR / "ptbxl.hdf5"
 
+# Challenge 2021 (ver ROADMAP, "Datasets candidatos a incorporar"): sin label de Chagas,
+# aporta labels de patron ECG (SNOMED-CT) para las cabezas auxiliares. No entra en
+# METADATA_PATH/build_metadata.py todavia -- integrarlo a Fase 4 (cabeza de Chagas
+# enmascarada) es una decision de arquitectura pendiente, ver FASES.md.
+CHALLENGE2021_DIR = DATA_DIR / "challenge2021"
+CHALLENGE2021_RAW_DIR = CHALLENGE2021_DIR / "training"
+CHALLENGE2021_HDF5 = CHALLENGE2021_DIR / "challenge2021.hdf5"
+CHALLENGE2021_LABELS_CSV = CHALLENGE2021_DIR / "challenge2021_labels.csv"
+
 # Salida de Fase 2 (src/preprocess.py): señal unificada (N, 2800, 12) a 400 Hz,
 # ya recortada y normalizada, lista para copiar a la maquina de entrenamiento.
 FASE2_HDF5 = DATA_DIR / "fase2_preprocessed.hdf5"
@@ -145,6 +154,9 @@ if __name__ == "__main__":
         ("code15", CODE15_DIR),
         ("samitrop", SAMITROP_DIR),
         ("ptbxl", PTBXL_DIR),
+        ("challenge2021 raw", CHALLENGE2021_RAW_DIR),
+        ("challenge2021 hdf5", CHALLENGE2021_HDF5),
+        ("challenge2021 labels", CHALLENGE2021_LABELS_CSV),
         ("metadata.parquet", METADATA_PATH),
         ("fase2 hdf5", FASE2_HDF5),
         ("fase2 metadata", FASE2_METADATA_PATH),
