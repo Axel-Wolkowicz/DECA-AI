@@ -102,8 +102,9 @@ def entrenar_epoca(modelo, loader, optimizador, scaler, loss_chagas, loss_rbbb, 
     suma_chagas = suma_rbbb = 0.0
     n_lotes = 0
 
-    for x, y_chagas, y_rbbb, mask_rbbb, peso in tqdm(loader, desc="  train", leave=False):
+    for x, y_chagas, y_rbbb, mask_rbbb, peso, demo in tqdm(loader, desc="  train", leave=False):
         x = x.to(device, non_blocking=True)
+        demo = demo.to(device, non_blocking=True)
         y_chagas = y_chagas.to(device, non_blocking=True)
         y_rbbb = y_rbbb.to(device, non_blocking=True)
         mask_rbbb = mask_rbbb.to(device, non_blocking=True)
@@ -111,7 +112,7 @@ def entrenar_epoca(modelo, loader, optimizador, scaler, loss_chagas, loss_rbbb, 
 
         optimizador.zero_grad(set_to_none=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=args.amp and device.type == "cuda"):
-            logit_chagas, logit_rbbb = modelo(x)
+            logit_chagas, logit_rbbb = modelo(x, demo)
             l_chagas = (loss_chagas(logit_chagas, y_chagas) * peso).sum() / peso.sum().clamp(min=1e-8)
             # Sin registros anotados en el lote el denominador seria 0. Pasa de verdad:
             # un lote de puro SaMi-Trop/PTB-XL no tiene ni un label de RBBB.
@@ -145,10 +146,11 @@ def predecir(modelo, loader, args, device):
     del loader. Los scores son probabilidades (sigmoid del logit)."""
     modelo.eval()
     chagas, rbbb, y_rbbb_todos, mask_todos = [], [], [], []
-    for x, _, y_rbbb, mask_rbbb, _ in tqdm(loader, desc="  val  ", leave=False):
+    for x, _, y_rbbb, mask_rbbb, _, demo in tqdm(loader, desc="  val  ", leave=False):
         x = x.to(device, non_blocking=True)
+        demo = demo.to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=args.amp and device.type == "cuda"):
-            logit_chagas, logit_rbbb = modelo(x)
+            logit_chagas, logit_rbbb = modelo(x, demo)
         chagas.append(torch.sigmoid(logit_chagas.float()).cpu().numpy())
         rbbb.append(torch.sigmoid(logit_rbbb.float()).cpu().numpy())
         y_rbbb_todos.append(y_rbbb.numpy())
@@ -181,6 +183,9 @@ def main():
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--peso-rbbb", type=float, default=0.5,
                    help="peso de la cabeza de RBBB en la loss total (la de Chagas es 1.0)")
+    p.add_argument("--con-demograficos", action="store_true",
+                   help="suma edad y sexo como entrada del modelo (default: apagado, "
+                        "arquitectura identica a las corridas previas)")
     p.add_argument("--peso-strong", type=float, default=None,
                    help="peso de los registros de etiqueta serologica (default: 1.0, ver dataset.py)")
     p.add_argument("--limit-train", type=int, default=None, help="muestra aleatoria de N registros")
@@ -221,7 +226,10 @@ def main():
     print(f"val   {len(meta_val):>7} registros  "
           f"({', '.join(f'{d}={n}' for d, n in meta_val['dataset'].value_counts().items())})")
 
-    modelo = ResNet1D(dropout=args.dropout).to(device)
+    modelo = ResNet1D(
+        dropout=args.dropout,
+        n_demograficos=2 if args.con_demograficos else 0,
+    ).to(device)
     print(f"modelo: {sum(p_.numel() for p_ in modelo.parameters()):,} parametros")
 
     if args.sampler == "balanceado":

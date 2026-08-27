@@ -832,7 +832,7 @@ Pendiente para cuando Axel decida encararlo:
 
 **Descarga: 100% completa y verificada.** 125.757/125.758 archivos en `D:\DECA-datasets\challenge2021\training\` (el único que falta, `training/ningb`, es una línea corrupta del manifiesto de PhysioNet — no es un archivo real, nunca va a existir). Desglose por fuente: chapman_shaoxing 20.505, cpsc_2018 13.762, cpsc_2018_extra 6.910, georgia 20.699, ningbo 63.881 archivos (.hea+.mat). 62.846 `.hea` vs 62.845 `.mat` (1 registro con par incompleto, ruido esperado — el conversor lo salta solo).
 
-**Conversión: escrita y validada por prueba de humo, pero la corrida completa NO terminó.** Se intentó dos veces:
+**Conversión: COMPLETADA el 2026-08-27 10:03** (ver subsección siguiente con los resultados). Antes de eso se había intentado dos veces sin éxito:
 1. Primera vez, corriendo como task en background de la sesión de Claude Code: se cortó sola sin completar ni el 1% — la sesión se reinició (reconexión) y mató el proceso, que no sobrevive a eso.
 2. Segunda vez, lanzada como proceso de Windows desatado de la sesión (`Start-Process` de PowerShell, para que sobreviva a un reinicio de sesión): Axel avisó que se iba a otra compu con el SSD en 10 minutos, así que se cortó a propósito para no dejar el HDF5 a medio escribir mientras se desconecta el disco. **Se limpiaron los archivos parciales** (`challenge2021.hdf5.tmp`) — no quedó nada corrupto ni a medias en el SSD.
 
@@ -842,7 +842,325 @@ python src/convert_challenge2021.py
 ```
 Tarda ~55 minutos (~19 registros/seg, medido). No necesita red — todo el trabajo es local (leer WFDB de `training/`, escribir `challenge2021.hdf5` + `challenge2021_labels.csv`). Requiere el mismo entorno que el resto del repo (`h5py`, `wfdb`, `pandas`, `numpy`, `tqdm` — ya en `requirements.txt`/`.venv`). Si se corta a la mitad, borrar `challenge2021.hdf5.tmp` antes de re-correr (el script no pisa un `.hdf5` final que ya exista, pero tampoco retoma un `.tmp` parcial — arranca de cero).
 
-Una vez que termine, falta: (a) completar esta sección con los números reales de conteo por patrón (hoy son solo la muestra de humo sobre chapman_shaoxing), (b) recalcular la tabla de ROADMAP.md con los conteos reales, (c) la decisión de arquitectura para integrarlo a Fase 4 (sección de arriba, "Qué falta" — sigue sin resolver).
+De los tres pendientes que quedaban al cortar, (a) y (b) están hechos (abajo y en ROADMAP.md); (c), la decisión de arquitectura para integrarlo a Fase 4, sigue sin resolver.
+
+### Conversión completada (2026-08-27) — resultados reales
+
+Corrida en la laptop Windows con el SSD conectado, **31 minutos** (33,75 reg/s de promedio, no los ~19/s estimados en la prueba de humo; el arranque en frío marca ~44/s y baja al estabilizarse). Salida: `challenge2021.hdf5` (**15,09 GB**, shape `(62845, 5000, 12)` a 500 Hz) + `challenge2021_labels.csv` (8,0 MB).
+
+**62.845/62.846 convertidos.** El único salteado es el `.hea` de ningbo sin su `.mat` — el par incompleto ya conocido de la descarga, no un bug. 101 registros tienen NaN en la señal y se guardan igual (la Fase 2 los descarta sola).
+
+| fuente | registros |
+|---|---|
+| chapman_shaoxing | 10.247 |
+| cpsc_2018 | 6.877 |
+| cpsc_2018_extra | 3.453 |
+| georgia | 10.344 |
+| ningbo | 31.924 |
+| **total** | **62.845** |
+
+**Positivos por patrón:**
+
+| patrón | positivos | % |
+|---|---|---|
+| BRD | 4.688 | 7,46% |
+| HBAI | 500 | 0,80% |
+| Extrasístoles ventriculares (PVC/VPB) | 1.845 | 2,94% |
+| Onda Q anormal | 1.406 | 2,24% |
+| Mala progresión de onda R | 526 | 0,84% |
+| **BRD + HBAI simultáneos** | **101** | **0,16%** |
+
+**El hallazgo que cambia el cálculo: el patrón clásico de Chagas (BRD+HBAI) aporta solo 101 casos — menos que los 284 que PTB-XL ya tiene solo.** La estimación previa de "+560 de HBAI" casi acertó el total (500 real), pero lo que importa para el objetivo clínico es la coocurrencia, y ahí Challenge 2021 suma poco. Multiplica todo lo demás (BRD ×2,8 sobre PTB-XL, onda Q ×2,6, PRWP que no existía), pero **no resuelve la escasez del patrón más específico**. Eso debería pesar en la decisión (c): el argumento fuerte para integrarlo sigue siendo atacar el atajo de fuente por diversidad de orígenes, no el volumen del patrón clásico.
+
+**Verificación de la salida** (además del conteo): CSV y HDF5 con la misma cantidad de filas, `row_index` contiguo 0..n-1, `record_id` únicos, señal muestreada en 4 puntos del corpus en rango físico correcto (mV, std 0,14-0,32), 0 registros salteados por frecuencia inesperada — **las 5 fuentes son 500 Hz uniformemente**, y las duraciones nativas van de 5,0 a 144,0 s. Se comprobó además que la coincidencia entre "101 con NaN" y "101 con BRD+HBAI" es casualidad: la intersección de los dos conjuntos es vacía.
+
+**Cross-check del mapeo SNOMED contra la tabla oficial:** `chapman_shaoxing` da `hbai=0` y `prwp=0`, que coincide exactamente con las columnas `Chapman_Shaoxing` de `dx_mapping_scored.csv` — el mismo control que ya había pasado la prueba de humo, ahora sobre el corpus entero.
+
+### Hueco encontrado en el mapeo SNOMED — decisión pendiente
+
+El cross-check por fuente destapó algo que la prueba de humo no podía ver (solo miraba chapman_shaoxing): **`cpsc_2018` da `pvc=0`**, y CPSC-2018 es un dataset cuyas 9 clases oficiales incluyen PVC. La causa es que CPSC codifica sus extrasístoles como **`164884008` (*ventricular ectopics*, VEB)**, que **no está en `SNOMED_A_PATRON`**. Aparece **741 veces** en el corpus (700 en cpsc_2018, 41 en georgia).
+
+| código | descripción | apariciones | estado |
+|---|---|---|---|
+| `164884008` | ventricular ectopics (VEB) | 741 | **NO mapeado** |
+| `427172004` | PVC | 1.188 | mapeado → `pvc` |
+| `17338001` | VPB | 659 | mapeado → `pvc` |
+| `11157007` / `251180001` | bigeminia / trigeminia ventricular | 23 | NO mapeado |
+| `75532003` | latido de escape ventricular | 57 | NO mapeado (**correcto**: es otro mecanismo, no una extrasístole) |
+
+**Impacto si se agrega `164884008`: extrasístoles pasa de 1.845 a 2.583 (+738, un +40%).** Sumando además bigeminia/trigeminia (que por definición son patrones *de* extrasístoles) daría 2.604.
+
+**Por qué no se cambió de una:** el criterio declarado en el docstring de `convert_challenge2021.py` es usar las equivalencias "que el propio challenge puntúa como el mismo hallazgo clínico", y VEB/PVC no son un par equivalente en el scoring oficial. Pero ese criterio es un medio, no el fin: el objetivo del ROADMAP es *extrasístoles ventriculares* como patrón clínico, y VEB es clínicamente lo mismo. Es una decisión de etiquetado, no mecánica, así que queda para que la tome Axel.
+
+**Costo de corregirlo: bajo.** No hace falta reconvertir el HDF5 de 15 GB — los labels salen solo de los headers `.hea`, así que regenerar `challenge2021_labels.csv` es cuestión de minutos, sin tocar la señal.
+
+---
+
+## Sesión del 2026-08-27 — qué significa 0,84 en la práctica, y el plan para mejorarlo
+
+Sesión de análisis disparada por dos preguntas de Axel: *"¿el AUC 0,84 es bueno o malo, en TP/FP/TN/FN?"* y *"¿cómo lo mejoramos?"*. No hubo corridas de entrenamiento nuevas.
+
+### 1. AUC 0,838 traducido a decisiones clínicas
+
+**El AUC no tiene TP/FP: es una métrica sin umbral.** Mide qué tan bien el modelo *ordena* pacientes, no qué decide. La matriz de confusión aparece recién al fijar un corte, y depende también de la prevalencia. Proyección sobre **100.000 personas al 1,9% de prevalencia** (1.900 enfermos), con la aproximación binormal de Fase 3 y `abl-peso1` (AUC 0,838):
+
+| corte | TP | FN | FP | TN | deriva | PPV | serologías/caso |
+|---|---|---|---|---|---|---|---|
+| **95% sensibilidad** (punto de operación de Fase 3) | 1.805 (1,80%) | 95 (0,10%) | 58.735 (58,74%) | 39.365 (39,36%) | **60,5%** | 3,0% | 33,5 |
+| 90% sensibilidad | 1.710 (1,71%) | 190 (0,19%) | 44.627 (44,63%) | 53.473 (53,47%) | 46,3% | 3,7% | 27,1 |
+| **banda alta, PPV ≥ 30%** | 249 (0,25%) | 1.651 (1,65%) | 580 (0,58%) | 97.520 (97,52%) | **0,8%** | 30,0% | 3,3 |
+| banda alta relajada, PPV ≥ 15% | 680 (0,68%) | 1.220 (1,22%) | 3.852 (3,85%) | 94.248 (94,25%) | 4,5% | 15,0% | 6,7 |
+
+**Lectura, sin adornos:** al punto de operación que fijó la Fase 3 (95% de sensibilidad), el modelo **deriva al 60,5% de la población** para encontrar el 95% de los casos, con 33,5 serologías por caso. Eso no es filtrar: es testear a casi todos con pasos intermedios. **El go/no-go de Fase 3 tenía razón** — 0,838 queda por debajo del piso de 0,85 y la tabla muestra por qué ese piso no era arbitrario.
+
+**Y al mismo tiempo, 0,838 está en el estado del arte publicado** (PLOS NTD 2023: 0,80; 5° del Moody Challenge 2025: 0,840). Las dos cosas son ciertas: el modelo no es malo, el objetivo estaba mal calibrado. El único uso hoy defendible es la **banda alta como priorizador** (3,3 serologías por caso), con el costo explícito de perder 87 de cada 100 enfermos — nunca comunicable como descarte.
+
+Salvedad metodológica: son la aproximación binormal, que la propia Fase 3 marca como "para planificar, no una promesa", proyectada sobre una población hipotética cuya composición no es la de arena A. La matriz empírica real sale de `evaluar.py` sobre validación.
+
+### 2. Hallazgo: SaMi-Trop trae variables clínicas que nunca usamos
+
+`samitrop/exams.csv` tiene 7 columnas y veníamos leyendo solo el `exam_id`. Trae **`normal_ecg`, `death` y `timey`** (años de seguimiento):
+
+| | registros | % |
+|---|---|---|
+| ECG anormal — proxy de cardiopatía | 1.345 | 82,5% |
+| ECG normal — los "positivos inaprendibles" del hallazgo 1 | 286 | 17,5% |
+| **Fallecidos en ≤3,4 años de seguimiento** | **104** | **6,4%** |
+| …de esos, con ECG anormal | 101 de 104 | 97,1% |
+
+**Por qué importa:** el hallazgo central del 2026-08-26 fue que el techo es de la etiqueta (serología = infección) y no del modelo, y que el PLOS NTD ganó +0,14/+0,18 de AUC solo redefiniendo el positivo como cardiopatía. **Estas tres columnas son el proxy de cardiopatía que nos faltaba, y ya estaban en el disco.**
+
+`death` es especialmente valioso porque **no se deriva del ECG**: es un desenlace independiente. Que 101 de las 104 muertes caigan en el grupo de ECG anormal es señal de que la anormalidad del trazado captura severidad real, no ruido.
+
+**Cautela sobre `normal_ecg` como target de entrenamiento: es circular.** Entrenar a predecir "ECG anormal" desde el ECG es trivial y no es específico de Chagas — el 60,4% de los negativos de CODE-15% también tiene ECG anormal (medido). Es el mismo error que el hallazgo 4 ya midió y descartó ("ECG no normal" da lift 1,4×). Sirve como **estrato de evaluación**, no como blanco.
+
+**Cautela sobre el proxy:** SaMi-Trop es una cohorte **reclutada** por ECG anormal, así que su 82,5% no representa a los seropositivos en general y la ganancia del PLOS puede no transferirse igual.
+
+### 3. Plan de mejora, ordenado por valor/costo
+
+Los dos primeros son **mediciones, no cambios de modelo** — y se hacen con el checkpoint que ya existe, sin reentrenar. Están primero a propósito: determinan si vale la pena el esfuerzo de modelado posterior.
+
+1. **Cuantificar cuánto del techo es ruido de etiqueta.** Replicar el experimento del PLOS sobre nuestros datos con el checkpoint que ya existe: reevaluar `abl-peso1` restringiendo los positivos a los que tienen ECG anormal, en las dos arenas con AUC, y comparar contra el número sin restringir.
+   - **Arena A** (la que decide el go/no-go, hoy 0,838): positivos = CODE-15% autorreportados; restringir a los que tienen `normal_ecg=False` (5.495 de 6.561 a nivel examen).
+   - **Arena D** (SaMi-Trop+ vs CODE-15%−): restringir SaMi-Trop a los 1.345 con ECG anormal de 1.631.
+   Los negativos quedan intactos en las dos. **Si el AUC salta a ~0,90, el problema es la etiqueta y la solución es de alcance** (declarar que detecta cardiopatía, que es lo que el ROADMAP dice querer, no infección); si no salta, el techo es real y hay que atacar arquitectura.
+   *(Corrección de un error cometido al plantear este paso: se había escrito "arena A restringiendo los positivos de SaMi-Trop". Arena A es **CODE-15% sola** — una fuente, dos clases, por eso el atajo de fuente es imposible adentro; SaMi-Trop vive en arenas B y D. Ver el docstring de `evaluar.py`.)*
+2. **Mortalidad como validación clínica.** ¿El score rankea más alto a los 104 que murieron? Misma pasada de inferencia. Un sí es un argumento clínico más fuerte que cualquier AUC contra serología.
+3. **Recuperar `real30ep-paciencialr8`.** El scheduler cortaba el LR ×10 desde la época ~7: las corridas largas estaban **congeladas, no convergidas**. La corrida que testea eso quedó lanzada y sin resultado. *(2026-08-27: la máquina de entrenamiento no responde al ping, sigue pendiente.)*
+4. **Edad y sexo como entrada del modelo.** Están en los tres datasets, no se usan, y el paper de PLOS tampoco los usó — palanca sin explorar en el campo. Cambio chico. Vigilar con el diagnóstico de atajo: las distribuciones etarias difieren por dataset.
+5. **Cabezas de patrón**, PTB-XL primero y Challenge 2021 después (ver sección de Challenge 2021 para el orden y su justificación). Probablemente no muevan el AUC; entregan la explicabilidad que el ROADMAP promete y hoy no damos.
+6. **Corregir la métrica del go/no-go.** Está escrito en AUC, los checkpoints se eligen por AUPRC, y la métrica real del Moody Challenge es TPR a capacidad fija de derivación. Con prevalencia 1,9% el AUC maquilla el desbalance. No mejora el modelo, corrige un veredicto mal formulado.
+
+**Postergado a propósito:** preentrenamiento con MIMIC-IV-ECG (90 GB, receta del 5° puesto). Caro, y solo tiene sentido después de saber si el techo es de etiqueta o de capacidad — que es lo que responde el punto 1.
+
+### 4. RESULTADO de los pasos 1 y 2 (medido el 2026-08-27)
+
+Inferencia de `abl-peso1/mejor.pt` sobre las 54.846 filas de validación, en la laptop Windows (**tiene GPU: RTX 3500 Ada, 12 GB** — dato que no estaba anotado en ningún lado; la inferencia tardó **43 segundos**, no hace falta la máquina de entrenamiento para esto). Agregación a paciente por `max`, igual que `evaluar.py`. IC95 por bootstrap estratificado (2.000 remuestreos, seed 42).
+
+**Control de que el pipeline es correcto:** arena A da **AUC 0,8378 / AUPRC 0,17550** contra los 0,838 / 0,17550 documentados. Reproduce exacto.
+
+**Paso 1 — arena A** (34.780 pacientes de CODE-15%, 666 positivos = 1,91%):
+
+| positivos considerados | n+ | AUC | IC95 | AUPRC |
+|---|---|---|---|---|
+| todos (baseline) | 666 | 0,8378 | [0,8227 – 0,8522] | 0,17550 |
+| **solo con ECG anormal** | 582 (87,4%) | **0,8622** | [0,8475 – 0,8759] | 0,18999 |
+| solo con ECG normal | 84 (12,6%) | 0,6686 | [0,6217 – 0,7140] | 0,00383 |
+
+**Paso 1 — arena D** (SaMi-Trop+ vs CODE-15%−, 230 seropositivos en val): baseline 0,8310 → **ECG anormal (196) 0,8567** → ECG normal (34) 0,6828. Mismo patrón, misma magnitud.
+
+**Conclusión, y contradice la lectura optimista del hallazgo 1.** La hipótesis de los "positivos inaprendibles" **se confirma en dirección pero no en magnitud**: los positivos con ECG normal son efectivamente casi invisibles para el modelo (AUC 0,669, AUPRC 0,004 — o sea, no los distingue de la población sana), pero **son solo el 12,6% de los positivos**, así que sacarlos compra **+0,024 de AUC, no los +0,14/+0,18 del PLOS**. Los intervalos de confianza no se solapan, así que la ganancia es real, pero es chica.
+
+**Por qué la diferencia con el PLOS:** su experimento compara *todos los seropositivos* contra *solo CCC diagnosticada*, y la fracción sin compromiso cardíaco ahí es mucho mayor. Nuestro `normal_ecg` es un proxy **mucho más grueso** que un diagnóstico de CCC: un ECG anormal no es cardiopatía chagásica (el 60,4% de los negativos de CODE-15% también tiene ECG anormal). La ganancia del PLOS puede seguir existiendo con la etiqueta correcta — pero **no la tenemos, y con el proxy que sí tenemos el techo no se explica por ruido de etiqueta**.
+
+**Consecuencia para el plan: el techo es mayormente real, no artefacto de la etiqueta.** Eso *justifica* el trabajo de arquitectura/features (pasos 3-5) en vez de volverlo innecesario, que era el resultado alternativo posible. Y baja la prioridad de redefinir el alcance del producto como única salida.
+
+**Paso 2 — mortalidad como validación clínica: resultado NEGATIVO donde importaba.**
+
+| cohorte | pacientes | fallecidos | AUC-muerte del score de Chagas | IC95 |
+|---|---|---|---|---|
+| **SaMi-Trop** (seropositivos) | 230 | 24 (10,4%) | **0,4569** | [0,3457 – 0,5734] |
+| CODE-15% (población general) | 34.649 | 1.242 (3,6%) | 0,6487 | [0,6332 – 0,6636] |
+
+**Dentro de la cohorte seropositiva el score no identifica quién se muere**: 0,457 con IC que contiene 0,5 — no hay señal. Con 24 muertes está muy sub-potenciado y no se puede descartar un efecto chico, pero sí queda descartado un efecto fuerte. **La hipótesis de "el modelo identifica a los que se van a deteriorar" no se sostiene con estos datos.**
+
+En cambio **sí predice mortalidad en la población general** (0,649, IC angosto, 1.242 muertes). Leído junto con el hallazgo 4 (P(Chagas | RBBB) = 13,79%), apunta a que el score está capturando **riesgo cardiovascular general**, no severidad específica de Chagas. Es un dato incómodo para el planteo del producto y conviene tenerlo presente: parte de lo que el modelo "acierta" en arena A puede ser "este corazón está enfermo", no "este corazón tiene Chagas".
+
+**Artefactos:** scripts de un solo uso en el scratchpad de la sesión (`inferir_val.py`, `analisis_ruido.py`), no versionados. Los scores crudos quedaron en `scores_val_ablpeso1.parquet` para no recalcular.
+
+### 5. Paso 6 implementado — métrica de capacidad fija en `evaluar.py`
+
+Se agregó `tpr_a_capacidad(y, score, capacidades)`: **de los enfermos reales, qué fracción cae dentro de un cupo fijo de derivaciones.** Cupos reportados: 1%, 2%, 5% y 10%; **el 5% es la métrica principal del Moody Challenge 2025**. Entra en el dict de arena A y arena D, y se imprime en el log de entrenamiento.
+
+**Por qué hacía falta una tercera vara.** Veníamos con tres criterios distintos sin notarlo: el go/no-go escrito en AUC, la selección de checkpoint por AUPRC, y la métrica del challenge que no es ninguna de las dos.
+
+- El **AUC** maquilla el desbalance: con prevalencia 1,9% el eje FPR = FP/(FP+TN) tiene un TN gigantesco, así que se acumulan miles de falsos positivos sin que la curva se mueva. Cada uno es una serología que alguien paga.
+- El **AUPRC** sí se mueve con cada falso positivo, pero promedia sobre *todos* los umbrales, incluidos los que derivan al 60% de la población y no se van a usar nunca.
+- **TPR a capacidad fija** responde la pregunta operativa real: *"si el sistema de salud banca N serologías, a cuántos enfermos encontramos con esas N"*. Es prima directa de las bandas de Fase 3.
+
+Nota de implementación: el corte es `ceil(cupo × n)` sobre el score ordenado. Con scores continuos los empates no importan; quedaría anotado si alguna vez se evalúan scores discretizados.
+
+**Resultado: la vara SÍ cambia el ranking — y el problema está en el go/no-go, no en la selección de checkpoint.** Se reevaluaron los 6 checkpoints locales sobre la misma validación (arena A, nivel paciente):
+
+| modelo | época | AUC | AUPRC | TPR@1% | TPR@2% | **TPR@5%** | TPR@10% | atajo |
+|---|---|---|---|---|---|---|---|---|
+| **abl-peso1** | 4 | 0,8378 | **0,1755** | **0,1772** | **0,2688** | **0,4144** | **0,5465** | −0,0021 |
+| abl-peso1-seed123 | 8 | 0,8395 | 0,1654 | 0,1697 | 0,2658 | 0,4144 | 0,5420 | −0,0052 |
+| abl-peso5 | 7 | 0,8310 | 0,1460 | 0,1667 | 0,2462 | 0,3919 | 0,5090 | +0,0002 |
+| real8ep | 4 | **0,8397** | 0,1500 | 0,1517 | 0,2402 | 0,3889 | 0,5270 | −0,0105 |
+| real1 | 1 | 0,8023 | 0,1362 | 0,1351 | 0,2102 | 0,3468 | 0,4640 | −0,0450 |
+| full_1epoca | 1 | 0,8118 | 0,1298 | 0,1321 | 0,2282 | 0,3784 | 0,5000 | −0,0594 |
+
+- ranking por **AUPRC**: abl-peso1 > abl-peso1-seed123 > real8ep > abl-peso5 > real1 > full_1epoca
+- ranking por **AUC**: **real8ep** > abl-peso1-seed123 > abl-peso1 > abl-peso5 > full_1epoca > real1
+- ranking por **TPR@5%**: abl-peso1 > abl-peso1-seed123 > abl-peso5 > real8ep > full_1epoca > real1
+
+**El AUC elige otro ganador.** `real8ep` lidera en AUC (0,8397) pero cae al 4° puesto en TPR@5%: con el mismo cupo de 5% encuentra **38,9%** de los casos contra el **41,4%** de `abl-peso1`. Elegir por AUC habría costado ~2,5 puntos de casos detectados a igual presupuesto de serologías.
+
+**En cambio AUPRC y TPR@5% coinciden en el ganador.** O sea: **la selección de checkpoint por AUPRC ya era correcta** — la inconsistencia que había que arreglar es el **go/no-go escrito en AUC**, que es la que podría habernos hecho elegir mal. Queda pendiente reescribir el criterio de Fase 3 en términos de TPR a capacidad fija.
+
+**Y da una forma mucho más comunicable de reportar el modelo:** con presupuesto para testear **5 de cada 100 personas, encontramos 41 de cada 100 enfermos** — 8,3× mejor que testear al azar. Al 1% de cupo el multiplicador es 17,7×. Eso se le explica a un ministerio; "AUC 0,84" no.
+
+### 6. Paso 4 implementado — edad y sexo como entrada (`--con-demograficos`)
+
+Hasta ahora el modelo veía **solo el trazado**: no sabía si el ECG era de alguien de 20 o de 80 años, con el dato disponible en los tres datasets y sin faltantes. El paper de PLOS tampoco los usó (solo estratificó post-hoc), así que es una palanca sin explorar en el campo.
+
+**Motivación reforzada por el paso 2 de esta misma sesión:** el score predice mortalidad en población general (0,649) pero no dentro de los seropositivos (0,457), o sea que está capturando riesgo cardiovascular general. La edad es justamente la variable que permite separar eso: un ECG alterado a los 30 es sospechoso, el mismo a los 80 es esperable.
+
+Cambios:
+- **`dataset.py`**: `normalizar_demograficos(meta)` devuelve `(N, 2)` = `[edad normalizada, es_hombre]`. `ECGDataset` ahora devuelve **6** elementos (la tupla es de tamaño fijo aunque el modelo corra sin demográficos, para que el desempaquetado no dependa de un flag).
+- **`model.py`**: `ResNet1D(..., n_demograficos=0)`. Con 0 la arquitectura es **idéntica** a la de todas las corridas previas — los checkpoints viejos cargan y la comparación es limpia. Con 2, `[edad, sexo]` se concatenan al vector de features **después** de toda la convolución, justo antes de las cabezas: no son una serie temporal. `forward(x, demo=None)`.
+- **`train.py`**: flag `--con-demograficos`, apagado por default.
+
+**Trampa encontrada y resuelta: PTB-XL codifica "mayor de 89 años" como `edad=300`** (convención de anonimización de la fuente). Son 293 registros que, sin recortar, entran a la red como personas de 300 años y dominan cualquier normalización. Sacando los 300, el máximo real de PTB-XL es exactamente 89. Se recorta a 90, que es lo que el centinela significa. La escala es **fija** (centro 50, escala 25) y no se estima de los datos: normalizar con estadísticos del split sería fuga.
+
+**Verificado:** `abl-peso1` carga sin cambios en el modelo `n_demograficos=0`; con ese valor el forward da resultado **bit a bit idéntico** aunque se le pase `demo` multiplicado por 1000 (`torch.equal` True en modo eval), así que la ruta vieja no puede contaminarse. El modelo con demográficos suma exactamente 4 parámetros (2 features × 2 cabezas).
+
+**Riesgo a vigilar:** las edades medias difieren por dataset (CODE-15% 53,2 / SaMi-Trop 59,3 / PTB-XL 62,8), así que la edad es candidata a atajo de fuente. Adentro de arena A es imposible por construcción (una sola fuente), pero **el diagnóstico de atajo hay que mirarlo sí o sí** en la corrida con demográficos.
+
+### 7. RESULTADO de la corrida `demo-v1` (edad + sexo) — mixto y NO convergido
+
+8 épocas en la laptop (~35 min), config idéntica a `abl-peso1` salvo el flag. Comparación en el mejor checkpoint de cada uno:
+
+| | `abl-peso1` (ép. 4) | `demo-v1` (ép. 8) | delta |
+|---|---|---|---|
+| AUC arena A | 0,8378 | **0,8475** | +0,0097 |
+| AUPRC arena A | **0,1755** | 0,1519 | −0,0236 |
+| TPR@5% | 41,4% | **42,0%** | +0,6 pp |
+| diagnóstico de atajo | −0,0021 | −0,0089 | sigue negativo, bien |
+
+**Mejor en AUC y en TPR@5%, peor en AUPRC.** El AUC 0,8475 es el más alto medido en todo el proyecto (el récord anterior era 0,847 de `real30ep` ép. 9). El AUPRC de `demo-v1` oscila mucho entre épocas (0,112 → 0,128 → 0,124 → 0,124 → 0,149 → 0,136 → 0,128 → 0,152), así que la caída puede ser en parte ruido de época.
+
+**Lo más importante: la corrida NO había convergido.** El AUC sube monótonamente en las últimas cuatro épocas (0,8391 → 0,8416 → 0,8460 → 0,8475) y el mejor checkpoint es **la última época**, no una del medio. Se cortó en 8 solo para igualar la config de `abl-peso1` (cuyo mejor fue la época 4). **Conclusión: no se puede decidir si edad y sexo sirven con esta corrida** — hace falta repetirla más larga, y de paso con `--paciencia-lr` alto para que el scheduler no la apague (hallazgo 3). Queda como la próxima corrida a hacer cuando haya GPU.
+
+El diagnóstico de atajo se mantuvo negativo en todas las épocas, así que el riesgo de que la edad sirviera de pista de origen **no se materializó**.
+
+### 8. Hueco del mapeo SNOMED: auditado y corregido
+
+Se bajaron `dx_mapping_scored.csv` y `dx_mapping_unscored.csv` del repo oficial y se cruzaron **los 118 códigos SNOMED presentes en el corpus** contra su nombre oficial, en vez de parchear el código suelto que había aparecido.
+
+**Resultado de la auditoría: BRD, HBAI, onda Q y PRWP estaban COMPLETOS** — ningún código faltante ni mal asignado. El único patrón con huecos era extrasístoles. Se agregaron tres códigos:
+
+| código | nombre oficial | decisión |
+|---|---|---|
+| `164884008` | ventricular ectopics | **incluido** — misma entidad clínica que PVC |
+| `11157007` | ventricular bigeminy | **incluido** — por definición, secuencia de extrasístoles |
+| `251180001` | ventricular trigeminy | **incluido** — ídem |
+| `81898007` | ventricular escape rhythm | excluido — mecanismo opuesto (el ventrículo suple un fallo del marcapasos, no se adelanta) |
+| `75532003` | ventricular escape beat | excluido — ídem |
+| `63593006` | supraventricular premature beats | excluido — supraventricular, no ventricular |
+| `251173003` | atrial bigeminy | excluido — auricular |
+
+Las exclusiones quedaron **escritas en el módulo** para que nadie las "arregle" después. Incluir bigeminia/trigeminia además deja Challenge 2021 consistente con cómo este repo ya agrupa el patrón en PTB-XL (hallazgo 5: `PVC`/`BIGU`/`TRIGU`/`PRC(S)`).
+
+**Efecto: extrasístoles 1.845 → 2.604 (+759).** Los otros cuatro patrones quedaron en +0, confirmando la auditoría. **Validación cruzada fuerte:** `cpsc_2018` pasó de 0 a **700** extrasístoles, que coincide exactamente con el conteo oficial de su clase «PVC» — era la fuente que delataba el bug.
+
+No hizo falta reconvertir los 15 GB: los patrones se recomputaron desde la columna `dx_codigos` ya guardada en el CSV, así que `row_index` y el orden quedan idénticos por construcción. Backup del CSV previo con sello de tiempo.
+
+### 9. BUG GRAVE encontrado y arreglado: el split se reshuffleaba entero al sumar un dataset
+
+Chequeo en seco antes de integrar Challenge 2021 a la Fase 2. **El resultado fue el peor posible.**
+
+`asignar_split` usaba **un solo `rng` consumido secuencialmente** en el loop de estratos, y `groupby` los sirve en orden alfabético. Un dataset nuevo cuyo nombre ordene antes — `challenge2021_False` va antes que `code15_False` — desplaza el estado del generador para **todos** los estratos posteriores.
+
+Medido simulando el alta de Challenge 2021 sobre la metadata real:
+
+| | |
+|---|---|
+| pacientes que cambian de split | **116.561 de 254.013 (45,9%)** |
+| **pacientes que pasan de TEST a TRAIN** | **26.617** |
+
+Es fuga directa del conjunto de test: cualquier modelo entrenado después habría visto en train a pacientes que estaban en el test con el que se midieron `abl-peso1`, `real30ep` y todos los demás, y las métricas históricas dejaban de ser comparables. **No se manifiesta como error: el pipeline corre perfecto y da números buenos.**
+
+**Arreglo, en dos partes:**
+
+1. **Split congelado.** Se generó `split_congelado.parquet` (254.013 pacientes) con el algoritmo viejo y se verificó contra `fase2_metadata.parquet`: **0 discrepancias sobre 252.227 pacientes en común**, o sea que el archivo *es* el split que usaron todos los modelos existentes. `asignar_split(..., congelado=...)` respeta esas asignaciones y solo sortea pacientes nuevos. `preprocess.py` lo carga solo si existe.
+2. **RNG por estrato.** La semilla de cada estrato se deriva de `(seed, nombre del estrato)` con sha256, así que los estratos son independientes y sumar uno nuevo no puede tocar a los viejos. Se usa sha256 y no `hash()` porque el hash de strings de Python está aleatorizado por proceso.
+
+**Verificado con 4 pruebas:** (1) reasignar sobre la metadata actual reproduce el congelado, 0 discrepancias; (2) sumando Challenge 2021, **0 pacientes viejos se mueven**; (3) el dataset nuevo queda repartido 70/15/15; (4) un dataset llamado `aaa_test`, que ordena antes que todos —el caso más peligroso—, tampoco mueve a nadie.
+
+### 10. PROPUESTA (requiere visto bueno de Axel): reescribir el go/no-go en unidades de capacidad
+
+El criterio de Fase 3 sigue escrito en AUC, que es la vara que ya sabemos equivocada para prevalencia 1,9%. **Para no caer en elegir umbrales que casualmente aprueben nuestro modelo, se tradujeron los umbrales originales** a TPR con cupo fijo vía el mismo modelo binormal que usa Fase 3:
+
+| AUC original | equivale a TPR@5% | qué era |
+|---|---|---|
+| 0,93 | **62,7%** | piso de despliegue completo |
+| 0,85 | **40,2%** | piso de "solo priorizador" |
+
+**Y acá aparece algo que cambia el veredicto.** Los modelos reales rinden **mejor que lo que el binormal predice para su propio AUC**:
+
+| modelo | AUC | TPR@5% que predice el binormal | TPR@5% **medido** |
+|---|---|---|---|
+| `abl-peso1` | 0,838 | 37,6% | **41,4%** |
+| `demo-v1` | 0,848 | 39,6% | **42,0%** |
+
+O sea que **las dos corridas ya superan el piso de 40,2% del "solo priorizador", aunque su AUC no llegue al 0,85 de ese mismo piso.** La curva ROC real tiene mejor forma en la zona de alta especificidad —la única que se usa— que la que asume el binormal. El criterio en AUC estaba rechazando un modelo que sí cumple la intención del criterio.
+
+**Propuesta:** reemplazar el go/no-go por TPR@5% ≥ 62,7% (despliegue completo) / ≥ 40,2% (solo priorizador) / por debajo, no se usa.
+
+**Por qué esto necesita firma explícita y no se cambió solo:** el criterio se fijó *antes* de entrenar justamente para no racionalizar después el número que tocara, y este cambio **convierte un NO-GO en un GO marginal para el uso de priorizador**. Que el cambio favorezca a nuestro propio modelo es exactamente la razón por la que no corresponde tomarlo sin revisión. Lo que sí está fuera de discusión es que los umbrales son *traducidos*, no inventados, y que la métrica de capacidad es la del Moody Challenge 2025, elegida por el campo antes y con independencia de nuestros resultados.
+
+**Nota lateral que afecta a toda la Fase 3:** si el binormal subestima el rendimiento real en la zona de operación, entonces **todas las tablas de Fase 3 (derivados, serologías por caso, especificidad por banda) son pesimistas**. Conviene recalcularlas empíricamente sobre validación en vez de con la aproximación.
+
+### 11. Las tres bandas, con números EMPÍRICOS
+
+Las tablas de bandas de la Fase 3 se dejan como están (son el registro de lo que se decidió el 2026-08-08, con la información de entonces). Estas son las mismas bandas medidas de verdad con `abl-peso1` sobre arena A en validación — 34.780 pacientes, 666 con Chagas, prevalencia 1,91%, que es justo la que asume la tabla original, así que el PPV es directamente interpretable.
+
+**Cortando por presupuesto de serologías:**
+
+| banda | personas | % pobl. | casos | % de los casos | 1 de cada |
+|---|---|---|---|---|---|
+| Urgente (top 1%) | 348 | 1,0% | 118 | 17,7% | **3** |
+| Sí (1-5%) | 1.391 | 4,0% | 158 | 23,7% | 9 |
+| No prioritario (resto) | 33.041 | 95,0% | **390** | **58,6%** | 85 |
+
+**Cortando como define la Fase 3** (alta = PPV ≥ 30%, media = hasta 95% de sensibilidad):
+
+| banda | personas | % pobl. | casos | % de los casos | 1 de cada |
+|---|---|---|---|---|---|
+| Alta | 443 | 1,3% | 133 | 20,0% | **3** |
+| Media | 19.763 | 56,8% | 500 | 75,1% | 40 |
+| Baja (no deriva) | 14.574 | 41,9% | **33** | **5,0%** | **442** |
+
+**El hallazgo: la seguridad de la banda "no deriva" depende enteramente de cuán grande se la haga, y el trade-off es brutal.**
+
+| si se deriva… | enfermos que quedan sin testear |
+|---|---|
+| 1% | 548 (82,3%) |
+| 2% | 487 (73,1%) |
+| 5% | 390 (58,6%) |
+| 10% | 302 (45,3%) |
+| 20% | 206 (30,9%) |
+| **58,1%** (el corte de 95% sens) | **33 (5,0%)** |
+
+Con la banda baja chica (derivando 58%), adentro queda 1 enfermo cada 442 — contra 1 cada 53 en la población general, o sea **8× más seguro que no hacer nada**, y ahí sí se sostiene un mensaje de "no es necesario por ahora". Con la banda baja grande (derivando 5%), adentro queda el 58,6% de los enfermos: eso no es "no es necesario", es "no alcanzó el presupuesto", y comunicarlo como descarte sería falso.
+
+**Conclusión de producto:** el marco de tres bandas es correcto, pero **dónde se ponen las líneas es una decisión de capacidad del sistema de salud, no del modelo**. Lo que sí es sólido hoy, en las dos versiones, es la **banda alta: 1 de cada 3 derivados da positivo sobre ~1,3% de la población** (17× sobre la base de 1 cada 53). Eso funciona ya. La banda baja como descarte no se sostiene salvo que se acepte derivar al 58%.
+
+Y el número que no se puede maquillar: aun en la configuración más conservadora quedan **33 enfermos** en la banda que no se deriva. Por eso el texto obligatorio ("No se detectaron indicios. Esto no descarta Chagas") no es un formalismo legal.
+
+**Reordenamiento de prioridades que sale de acá: las cabezas de patrón (paso 5) SUBEN de prioridad.** Se venían postergando porque probablemente no mueven el AUC. Pero si el producto es un priorizador, se le está diciendo a un médico "testeá a este primero", y lo primero que va a preguntar es *por qué*. Con un solo número no hay respuesta; con "BRD + HBAI" sí. La explicabilidad deja de ser un extra del ROADMAP y pasa a ser parte del producto mínimo — y que no mueva el AUC deja de importar, porque no era para eso.
 
 ---
 

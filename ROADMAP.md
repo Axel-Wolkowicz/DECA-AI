@@ -60,23 +60,26 @@ Ninguno tiene etiqueta de Chagas: **aportan etiqueta de los patrones ECG objetiv
 | [**Challenge 2021**](https://physionet.org/content/challenge-2021/1.0.3/) | **12,6 GB** | ~62.879 públicos (5 fuentes — ver corrección abajo) | WFDB (`.mat`+`.hea`), SNOMED-CT en el campo `#Dx:` | **Abierto**, CC-BY 4.0 | Etiquetas de los 3 patrones objetivo en poblaciones de EE.UU. y China |
 | [**MIMIC-IV-ECG**](https://physionet.org/content/mimic-iv-ecg/1.0/) | 90,4 GB | ~800.000 (≈160.000 pacientes) | WFDB (`.dat`+`.hea`) | **Abierto**, ODbL v1.0 | Preentrenamiento auto-supervisado / por biomarcadores (receta del 5° puesto del Moody 2025) |
 
-**Challenge 2021 — composición y qué agrega realmente.** Sus fuentes públicas son CPSC (6.877), CPSC-Extra (3.453), INCART (74), PTB/PTB-XL (21.837), Georgia (10.344), Chapman-Shaoxing (10.247) y Ningbo (34.905). **PTB-XL ya lo tenemos**, así que el aporte neto es ~66.000 registros nuevos. Descontando PTB-XL, lo que suma en nuestros patrones objetivo:
+**Challenge 2021 — composición y qué agrega realmente (conteos REALES, medidos el 2026-08-27).** Convertido con `src/convert_challenge2021.py`: **62.845 registros** de 5 fuentes — chapman_shaoxing 10.247, cpsc_2018 6.877, cpsc_2018_extra 3.453, georgia 10.344, ningbo 31.924. No incluye INCART ni PTB/PTB-XL (ver corrección abajo), así que **no hay nada que descontar: todo lo que trae es nuevo**.
 
-| patrón | clase SNOMED | total | ya tenemos (PTB-XL) | **nuevo** |
-|---|---|---|---|---|
-| BRD (todas las variantes) | `CRBBB`/`IRBBB`/`RBBB` | 6.687 | 1.660 | **~5.027** |
-| **HBAI** — *el label escaso* | `LAnFB` (445118002) | 2.186 | 1.626 | **560** |
-| Extrasístoles ventriculares | `PVC`/`VPB` | 1.938 | 0 en este mapeo | **1.938** |
-| Onda Q anormal (zona inactiva) | `QAb` (164917005) | 2.076 | 548 | **1.528** |
-| Mala progresión de onda R | `PRWP` (365413008) | 638 | 0 | **638** (patrón nuevo) |
+| patrón | clase SNOMED | positivos | % del corpus |
+|---|---|---|---|
+| BRD (todas las variantes) | `CRBBB`/`RBBB`/`IRBBB` | 4.688 | 7,46% |
+| **HBAI** — *el label escaso* | `LAnFB` (445118002) | **500** | 0,80% |
+| Extrasístoles ventriculares | `PVC`/`VPB` | 1.845 | 2,94% |
+| Onda Q anormal (zona inactiva) | `QAb` (164917005) | 1.406 | 2,24% |
+| Mala progresión de onda R | `PRWP` (365413008) | 526 | 0,84% |
+| **BRD + HBAI simultáneos** — *el patrón clásico de Chagas* | — | **101** | 0,16% |
 
-**El cuello de botella es HBAI**: solo suma 560 registros nuevos, y el patrón clásico de Chagas es BRD **+** HBAI *en simultáneo*. La coocurrencia va a seguir siendo escasa (en PTB-XL son 284).
+**El cuello de botella de HBAI resultó PEOR de lo estimado.** La estimación previa (560 nuevos) casi acertó el total de HBAI (500 real), pero lo que importa es la coocurrencia BRD+HBAI, que es el patrón clásico de Chagas: **Challenge 2021 aporta 101 casos, menos que los 284 que ya tiene PTB-XL solo**. Bajar 12,6 GB y 62.845 registros multiplica todo lo demás (BRD ×2,8, onda Q ×2,6, y PRWP que no teníamos), pero **no resuelve la escasez del patrón más específico — la agrava en términos relativos**.
 
-**Corrección (2026-08-26/27, ver FASES.md): la tabla de arriba está mal en su composición.** El manifiesto real de Challenge 2021 v1.0.3 (`SHA256SUMS.txt`) **no incluye INCART ni PTB/PTB-XL** bajo `training/`. Son 5 fuentes, no 7: chapman_shaoxing (~10.252 registros), cpsc_2018 (~6.881), cpsc_2018_extra (~3.455), georgia (~10.349), ningbo (~31.940) — **~62.879 registros en total**, no ~88.000, y **no hay PTB-XL que descontar** (nunca estuvo, así que tampoco hay "aporte neto" que restarle — todo lo que traiga es nuevo). La columna "nuevo" de la tabla de patrones quedó calculada sobre una composición que no es la real; se recalcula con los conteos verdaderos de `challenge2021_labels.csv` una vez terminada la conversión (`src/convert_challenge2021.py`, ya escrito y probado).
+**Salvedad abierta sobre el conteo de extrasístoles.** El mapeo de `convert_challenge2021.py` no incluye `164884008` (*ventricular ectopics*), que aparece **741 veces** (700 de ellas en cpsc_2018, donde es exactamente su clase «PVC» oficial). Si se lo considera el mismo hallazgo clínico que `PVC`/`VPB` — clínicamente lo es —, extrasístoles pasa de 1.845 a **2.583**. Decisión de etiquetado pendiente, ver FASES.md.
+
+**Corrección (2026-08-26/27, ver FASES.md): la tabla de arriba está mal en su composición.** El manifiesto real de Challenge 2021 v1.0.3 (`SHA256SUMS.txt`) **no incluye INCART ni PTB/PTB-XL** bajo `training/`. Son 5 fuentes, no 7: chapman_shaoxing (~10.252 registros), cpsc_2018 (~6.881), cpsc_2018_extra (~3.455), georgia (~10.349), ningbo (~31.940) — **~62.879 registros en total**, no ~88.000, y **no hay PTB-XL que descontar** (nunca estuvo, así que tampoco hay "aporte neto" que restarle — todo lo que traiga es nuevo). La tabla de patrones de arriba **ya fue recalculada** (2026-08-27) sobre los conteos verdaderos de `challenge2021_labels.csv`, con la conversión terminada.
 
 **A qué nos enfrentamos si lo incorporamos:**
 - **Formato WFDB = ~176.000 archivos chicos.** Es exactamente lo que el SSD exFAT hace mal (misma razón por la que PTB-XL se convirtió a HDF5). Mitigación: son solo 12,6 GB — descomprimir en disco interno, convertir a HDF5 y recién ahí mover, replicando `convert_ptbxl.py`.
-- **Frecuencias y duraciones heterogéneas**: mayormente 500 Hz (resampleo a 400 Hz, ya resuelto), pero las duraciones van de 5 a 144 s. Los registros de <7,0 s los descarta la Fase 2 tal como está. INCART (74 registros, 257 Hz, 30 min) conviene descartarlo entero.
+- **Frecuencias y duraciones heterogéneas**: **medido — las 5 fuentes son 500 Hz uniformemente** (0 registros salteados por frecuencia inesperada), y las duraciones nativas van de 5,0 a 144,0 s. El conversor las normaliza a la ventana de 10 s / 5.000 muestras de `ptbxl.hdf5` (recorte centrado o relleno con cero), y la Fase 2 resamplea 500→400 Hz de forma genérica, sin código específico por dataset. INCART no existe en el dataset real, así que no hubo nada que descartar.
 - **Etiquetas en SNOMED-CT dentro del header**, no en un CSV: hace falta un parser + el mapeo de [`dx_mapping_scored.csv`](https://github.com/physionetchallenges/evaluation-2021).
 - **Riesgo de atajo de fuente**: agrega 6 orígenes nuevos con sus propias firmas de equipo. La hipótesis es que *debilita* el atajo (la fuente deja de predecir la etiqueta de Chagas, porque ninguna de estas la tiene), pero se verifica midiendo, no a priori.
 

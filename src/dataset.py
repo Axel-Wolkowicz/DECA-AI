@@ -111,8 +111,37 @@ def filtrar_split(
     return sub.reset_index(drop=True)
 
 
+EDAD_TOPE = 90.0   # ver normalizar_demograficos
+EDAD_CENTRO = 50.0
+EDAD_ESCALA = 25.0
+
+
+def normalizar_demograficos(meta: pd.DataFrame) -> np.ndarray:
+    """(N, 2) float32 con [edad normalizada, es_hombre]. Sin faltantes en los 3 datasets.
+
+    **El tope de edad no es cosmetico.** PTB-XL codifica "mayor de 89" como `edad=300`
+    (convencion de anonimizacion de la fuente): son 293 registros que, sin recortar,
+    entran a la red como personas de 300 anios y dominan cualquier normalizacion. Sacando
+    los 300, el maximo de PTB-XL es exactamente 89. Se recorta a 90 porque es lo que el
+    centinela realmente significa (89+), no un valor inventado.
+
+    La escala es fija y no depende de los datos (centro 50, escala 25, ~la media y 1,3
+    desvios de CODE-15%) para que train/val/test y cualquier corrida futura vean la misma
+    transformacion -- normalizar con estadisticos del split traeria fuga.
+    """
+    edad = meta["edad"].to_numpy(dtype=np.float32)
+    edad = np.clip(edad, 0.0, EDAD_TOPE)
+    edad = (edad - EDAD_CENTRO) / EDAD_ESCALA
+    es_hombre = (meta["sexo"].to_numpy() == "M").astype(np.float32)
+    return np.stack([edad, es_hombre], axis=1).astype(np.float32)
+
+
 class ECGDataset(Dataset):
-    """Devuelve (señal (12, 2800), chagas, rbbb, rbbb_mask, peso).
+    """Devuelve (señal (12, 2800), chagas, rbbb, rbbb_mask, peso, demo).
+
+    `demo` es (2,) = [edad normalizada, es_hombre]. Se devuelve SIEMPRE, aunque el modelo
+    corra sin demograficos (`--con-demograficos` apagado): mantener la tupla de tamanio
+    fijo evita que el desempaquetado del loop dependa de un flag.
 
     La señal se transpone de (2800, 12) a (12, 2800) porque Conv1d espera (canales,
     tiempo). El orden de las filas es el del DataFrame que se le pasa, asi que con
@@ -128,6 +157,7 @@ class ECGDataset(Dataset):
         self.rbbb = self.meta["rbbb_label"].to_numpy(dtype=np.float32)
         self.rbbb_mask = self.meta["rbbb_mask"].to_numpy(dtype=np.float32)
         self.peso = self.meta["peso"].to_numpy(dtype=np.float32)
+        self.demo = normalizar_demograficos(self.meta)
         self._h5 = None  # apertura perezosa: ver punto 3 del docstring del modulo
 
     def __len__(self) -> int:
@@ -150,6 +180,7 @@ class ECGDataset(Dataset):
             torch.tensor(self.rbbb[i]),
             torch.tensor(self.rbbb_mask[i]),
             torch.tensor(self.peso[i]),
+            torch.from_numpy(self.demo[i]),
         )
 
     def __getstate__(self):

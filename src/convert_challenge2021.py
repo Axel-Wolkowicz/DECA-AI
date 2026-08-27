@@ -58,9 +58,28 @@ SNOMED_A_PATRON = {
     "445118002": "hbai",  # left anterior fascicular block (LAnFB)
     "427172004": "pvc",   # premature ventricular contractions (PVC)
     "17338001": "pvc",    # ventricular premature beats (VPB) -- misma entidad que PVC
+    "164884008": "pvc",   # ventricular ectopics (VEB) -- ver "Auditoria" abajo
+    "11157007": "pvc",    # ventricular bigeminy -- un patron DE extrasistoles
+    "251180001": "pvc",   # ventricular trigeminy -- idem
     "164917005": "qab",   # qwave abnormal (QAb)
     "365413008": "prwp",  # poor R wave progression (PRWP)
 }
+
+# Auditoria completa contra dx_mapping_scored.csv + dx_mapping_unscored.csv (2026-08-27):
+# se cruzaron los 118 codigos SNOMED presentes en el corpus contra su nombre oficial. BRD,
+# HBAI, QAb y PRWP quedaron COMPLETOS -- ningun codigo faltante ni mal asignado. El unico
+# patron con huecos era extrasistoles, y el mas grande era `164884008` (741 apariciones,
+# 700 de ellas en cpsc_2018, que es exactamente su clase "PVC" oficial: por eso esa fuente
+# daba pvc=0 antes de este arreglo).
+#
+# **Codigos deliberadamente NO mapeados a pvc**, para que no los "arregle" alguien despues:
+#   81898007  ventricular escape rhythm  -- mecanismo OPUESTO: el ventriculo suple un fallo
+#   75532003  ventricular escape beat    -- del marcapasos sinusal, no se adelanta
+#   63593006  supraventricular premature beats -- supraventricular, no ventricular
+#   251173003 atrial bigeminy            -- auricular, no ventricular
+# Bigeminia y trigeminia SI entran porque son, por definicion, secuencias de extrasistoles
+# ventriculares -- y porque es lo que este repo ya hace para PTB-XL (FASES.md, hallazgo 5,
+# donde el patron se agrupa como PVC/BIGU/TRIGU/PRC(S)). Deja los dos datasets consistentes.
 PATRONES = ["brd", "hbai", "pvc", "qab", "prwp"]
 
 

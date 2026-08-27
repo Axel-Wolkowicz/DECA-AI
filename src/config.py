@@ -138,6 +138,9 @@ CHALLENGE2021_LABELS_CSV = CHALLENGE2021_DIR / "challenge2021_labels.csv"
 # ya recortada y normalizada, lista para copiar a la maquina de entrenamiento.
 FASE2_HDF5 = DATA_DIR / "fase2_preprocessed.hdf5"
 FASE2_METADATA_PATH = DATA_DIR / "fase2_metadata.parquet"
+# Split congelado por paciente. Ver split_patients.py: existe para que agregar un
+# dataset nuevo NO le mueva el split a los pacientes que ya estan.
+SPLIT_CONGELADO_PATH = DATA_DIR / "split_congelado.parquet"
 
 # Fase 4: checkpoints y metricas de cada corrida. Van al SSD junto con los datos, no al
 # repo (pesan decenas de MB por corrida).

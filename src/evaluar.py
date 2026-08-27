@@ -32,6 +32,12 @@ from sklearn.metrics import average_precision_score, precision_recall_curve, roc
 SENSIBILIDAD_OBJETIVO = 0.95
 PPV_BANDA_ALTA = 0.30
 
+# Cupos de derivacion para la metrica de capacidad fija (ver tpr_a_capacidad). El 5% es
+# el cupo exacto que usa el Moody Challenge 2025 como metrica principal; los otros tres
+# estan para ver la forma de la curva, no para decidir.
+CAPACIDADES = (0.01, 0.02, 0.05, 0.10)
+CAPACIDAD_CHALLENGE = 0.05
+
 
 def agregar_por_paciente(meta: pd.DataFrame, scores: np.ndarray, modo: str = "max") -> pd.DataFrame:
     """Colapsa examenes a pacientes. 32% de los examenes de CODE-15% son repeticiones de
@@ -84,6 +90,41 @@ def _en_umbral(y: np.ndarray, score: np.ndarray, umbral: float) -> dict:
     }
 
 
+def tpr_a_capacidad(y: np.ndarray, score: np.ndarray, capacidades=CAPACIDADES) -> dict:
+    """De los enfermos reales, que fraccion cae dentro de un cupo fijo de derivaciones.
+
+    Es la pregunta operativa de verdad -- "si el sistema de salud banca N serologias, a
+    cuantos enfermos encontramos con esas N" -- y es la metrica principal del Moody
+    Challenge 2025 (cupo 5%). Existe porque ni AUC ni AUPRC la responden:
+
+    - El **AUC** maquilla el desbalance. Con prevalencia 1,9% el eje FPR = FP/(FP+TN)
+      tiene un TN gigantesco, asi que se pueden acumular miles de falsos positivos sin
+      que la curva se mueva. Cada uno de esos es una serologia que alguien paga.
+    - El **AUPRC** si se mueve con cada falso positivo, pero promedia sobre TODOS los
+      umbrales, incluidos los que derivan al 60% de la poblacion y que jamas se van a
+      usar. Aca solo importa el rango de cupos que el sistema de salud puede sostener.
+
+    Nota sobre empates: se ordena por score descendente y se corta en ceil(cupo*n). Si hay
+    empates justo en el corte, el resultado depende del orden de desempate -- con scores
+    continuos de una red no pasa en la practica, pero vale saberlo si alguna vez se
+    evaluan scores discretizados.
+    """
+    y = np.asarray(y)
+    score = np.asarray(score)
+    n_total = len(y)
+    n_pos = float((y > 0).sum())
+    if n_total == 0 or n_pos == 0:
+        return {f"tpr@{int(c*100)}%": float("nan") for c in capacidades}
+
+    orden = np.argsort(-score, kind="stable")
+    y_ord = y[orden]
+    out = {}
+    for c in capacidades:
+        k = int(np.ceil(c * n_total))
+        out[f"tpr@{int(c*100)}%"] = float((y_ord[:k] > 0).sum() / n_pos)
+    return out
+
+
 def _discriminacion(y: np.ndarray, score: np.ndarray) -> dict:
     if len(np.unique(y)) < 2:
         return {"auc": float("nan"), "auprc": float("nan")}
@@ -120,6 +161,7 @@ def evaluar_arenas(
     res["arena_A"] = {
         **_discriminacion(ya, sa),
         "prevalencia": float(ya.mean()),
+        "capacidad": tpr_a_capacidad(ya, sa),
         "banda_media": _en_umbral(ya, sa, umbrales["umbral_bajo"]),
         "banda_alta": _en_umbral(ya, sa, umbrales["umbral_alto"]),
     }
@@ -147,7 +189,12 @@ def evaluar_arenas(
         neg = code15[code15["y"] == 0]
         yd = np.concatenate([np.ones(len(samitrop)), np.zeros(len(neg))])
         sd = np.concatenate([samitrop["score"].to_numpy(), neg["score"].to_numpy()])
-        res["arena_D"] = {"n_pos": int(len(samitrop)), "n_neg": int(len(neg)), **_discriminacion(yd, sd)}
+        res["arena_D"] = {
+            "n_pos": int(len(samitrop)),
+            "n_neg": int(len(neg)),
+            **_discriminacion(yd, sd),
+            "capacidad": tpr_a_capacidad(yd, sd),
+        }
 
     pooled = _discriminacion(pac["y"].to_numpy(), pac["score"].to_numpy())
     res["diagnostico_atajo"] = {
@@ -165,6 +212,13 @@ def formatear(res: dict) -> str:
     a, lineas = res["arena_A"], []
     lineas.append(
         f"  A code15    AUC {a['auc']:.4f}  AUPRC {a['auprc']:.4f}  prev {a['prevalencia']*100:.2f}%"
+    )
+    cap = a["capacidad"]
+    lineas.append(
+        "    capacidad fija: " + "  ".join(
+            f"{k} {v*100:5.1f}%" + ("*" if k == f"tpr@{int(CAPACIDAD_CHALLENGE*100)}%" else "")
+            for k, v in cap.items()
+        ) + "   (* metrica del Moody Challenge 2025)"
     )
     bm, ba = a["banda_media"], a["banda_alta"]
     lineas.append(

@@ -65,6 +65,7 @@ class ResNet1D(nn.Module):
         canales=(128, 196, 256, 320),
         canales_stem: int = 64,
         dropout: float = 0.2,
+        n_demograficos: int = 0,
     ):
         super().__init__()
         self.stem = nn.Sequential(
@@ -79,12 +80,30 @@ class ResNet1D(nn.Module):
         self.bloques = nn.Sequential(*bloques)
 
         self.n_features = c_in * largo
-        self.cabeza_chagas = nn.Linear(self.n_features, 1)
-        self.cabeza_rbbb = nn.Linear(self.n_features, 1)
+        # n_demograficos=0 por default a proposito: deja la arquitectura identica a la de
+        # todas las corridas previas, asi que los checkpoints viejos siguen cargando y la
+        # comparacion contra ellos es limpia. Con 2 entran [edad, sexo] concatenados al
+        # vector de features justo antes de las cabezas -- despues de toda la convolucion,
+        # que es donde tienen sentido: no son una serie temporal.
+        self.n_demograficos = n_demograficos
+        n_entrada = self.n_features + n_demograficos
+        self.cabeza_chagas = nn.Linear(n_entrada, 1)
+        self.cabeza_rbbb = nn.Linear(n_entrada, 1)
 
-    def forward(self, x):
-        """x: (batch, 12, 2800) -> (logit_chagas, logit_rbbb), cada uno (batch,)."""
+    def forward(self, x, demo=None):
+        """x: (batch, 12, 2800) -> (logit_chagas, logit_rbbb), cada uno (batch,).
+
+        `demo` es (batch, n_demograficos) y solo se usa si el modelo se construyo con
+        n_demograficos > 0; si no, se ignora.
+        """
         h = self.bloques(self.stem(x)).flatten(1)
+        if self.n_demograficos:
+            if demo is None:
+                raise ValueError(
+                    f"el modelo se construyo con n_demograficos={self.n_demograficos} "
+                    "pero forward() recibio demo=None"
+                )
+            h = torch.cat([h, demo.to(h.dtype)], dim=1)
         return self.cabeza_chagas(h).squeeze(-1), self.cabeza_rbbb(h).squeeze(-1)
 
 

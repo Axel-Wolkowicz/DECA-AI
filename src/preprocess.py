@@ -39,7 +39,7 @@ import pandas as pd
 from scipy.signal import resample_poly
 from tqdm import tqdm
 
-from config import FASE2_HDF5, FASE2_METADATA_PATH
+from config import FASE2_HDF5, FASE2_METADATA_PATH, SPLIT_CONGELADO_PATH
 from eda_utils import cargar_metadata, path_para
 from split_patients import asignar_split
 
@@ -94,7 +94,15 @@ def main():
     args = parser.parse_args()
 
     meta = cargar_metadata()
-    meta["split"] = asignar_split(meta)
+    # Se respeta el split ya tomado (ver split_patients.asignar_split): sin esto, sumar un
+    # dataset nuevo reasigna pacientes viejos y contamina el test set.
+    congelado = None
+    if SPLIT_CONGELADO_PATH.exists():
+        congelado = pd.read_parquet(SPLIT_CONGELADO_PATH)
+        print(f"split congelado: {len(congelado):,} pacientes conservan su asignacion")
+    else:
+        print("AVISO: no hay split congelado; se sortea todo de cero")
+    meta["split"] = asignar_split(meta, congelado=congelado)
     if args.limit:
         meta = meta.iloc[: args.limit].copy()
 
