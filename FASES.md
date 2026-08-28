@@ -1162,6 +1162,33 @@ Y el número que no se puede maquillar: aun en la configuración más conservado
 
 **Reordenamiento de prioridades que sale de acá: las cabezas de patrón (paso 5) SUBEN de prioridad.** Se venían postergando porque probablemente no mueven el AUC. Pero si el producto es un priorizador, se le está diciendo a un médico "testeá a este primero", y lo primero que va a preguntar es *por qué*. Con un solo número no hay respuesta; con "BRD + HBAI" sí. La explicabilidad deja de ser un extra del ROADMAP y pasa a ser parte del producto mínimo — y que no mueva el AUC deja de importar, porque no era para eso.
 
+### 12. Paso 3 RECUPERADO: `real30ep-paciencialr8` — el bug del scheduler era real, pero arreglarlo no sirve
+
+Se recuperó la corrida que quedó colgada el 2026-08-26 (la máquina se había vuelto inalcanzable). **Completó las 30 épocas.** Config idéntica a `real30ep` salvo `--paciencia-lr 8` contra el 3 hardcodeado, mismo seed — o sea un experimento natural limpio: **las dos corridas son idénticas hasta la época 7** y divergen en la 8, que es justo cuando el scheduler actúa por primera vez.
+
+**El diagnóstico del hallazgo 3 se confirma, con la huella exacta que predecía.** Variación en las últimas 10 épocas:
+
+| corrida | rango de loss | rango de AUC |
+|---|---|---|
+| `real30ep` (paciencia 3) | 0,8511–0,8562 (**Δ 0,0052**) | 0,8424–0,8434 (**Δ 0,0010**) |
+| `real30ep-paciencialr8` (paciencia 8) | 0,7458–0,8094 (Δ 0,0637) | 0,8345–0,8446 (Δ 0,0102) |
+
+La loss de `real30ep` se mueve **12× menos**: con el LR recortado a ~0, el modelo devolvía el mismo número época tras época. **Las últimas ~20 épocas de las corridas largas efectivamente no entrenaban nada.** Con paciencia 8 la loss sigue bajando de verdad (0,9904 → 0,7458).
+
+**Pero el techo no se rompe. La hipótesis queda refutada en lo que importaba:**
+
+| | mejor AUC | mejor AUPRC |
+|---|---|---|
+| `real30ep` (p3) | 0,8465 (ép. 9) | 0,1705 (ép. 3) |
+| `real30ep-paciencialr8` (p8) | **0,8484** (ép. 10) | **0,1735** (ép. 20) |
+| ganancia | **+0,0019** | **+0,0030** |
+
+Y hay algo peor que "no mejora": **a partir de la época ~10 la corrida con paciencia 8 sobreajusta**. La loss de train sigue cayendo hasta 0,7458 mientras el AUC de validación *baja* de 0,8484 (ép. 10) a 0,8369 (ép. 30). El entrenamiento extra que el scheduler estaba impidiendo no era entrenamiento útil: era sobreajuste.
+
+**Conclusión, que cierra la última hipótesis abierta de "nos estamos dejando performance en la mesa":** el scheduler sí estaba apagando el entrenamiento, era un bug real y valía la pena arreglarlo — pero **el techo de ~0,84-0,85 es capacidad genuina del modelo y de los datos, no un artefacto**. Leído junto con el resultado del paso 1 de esta sesión (quitar el ruido de etiqueta compra solo +0,024), las dos explicaciones alternativas al techo quedan medidas y descartadas. Lo que queda para mover la aguja es cambiar el planteo (datos, target, arquitectura), no ajustar hiperparámetros.
+
+Nota: ambas corridas de 30 épocas usan `peso_strong` por default, no el 1,0 de `abl-peso1`, así que sus AUPRC (~0,17) no son directamente comparables con el 0,1755 de `abl-peso1`. La comparación p3 vs p8 sí es limpia — es el único parámetro que cambia.
+
 ---
 
 ## Fase 5 — Validación y evaluación 🔲
