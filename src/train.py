@@ -102,9 +102,10 @@ def entrenar_epoca(modelo, loader, optimizador, scaler, loss_chagas, loss_rbbb, 
     suma_chagas = suma_rbbb = 0.0
     n_lotes = 0
 
-    for x, y_chagas, y_rbbb, mask_rbbb, peso, demo in tqdm(loader, desc="  train", leave=False):
+    for x, y_chagas, y_rbbb, mask_rbbb, peso, demo, mask_chagas in tqdm(loader, desc="  train", leave=False):
         x = x.to(device, non_blocking=True)
         demo = demo.to(device, non_blocking=True)
+        mask_chagas = mask_chagas.to(device, non_blocking=True)
         y_chagas = y_chagas.to(device, non_blocking=True)
         y_rbbb = y_rbbb.to(device, non_blocking=True)
         mask_rbbb = mask_rbbb.to(device, non_blocking=True)
@@ -113,7 +114,12 @@ def entrenar_epoca(modelo, loader, optimizador, scaler, loss_chagas, loss_rbbb, 
         optimizador.zero_grad(set_to_none=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=args.amp and device.type == "cuda"):
             logit_chagas, logit_rbbb = modelo(x, demo)
-            l_chagas = (loss_chagas(logit_chagas, y_chagas) * peso).sum() / peso.sum().clamp(min=1e-8)
+            # Enmascarada igual que la de RBBB. Hoy `mask_chagas` es 1.0 en todo el corpus,
+            # asi que este numero es identico al de antes de la mascara; el mecanismo existe
+            # para poder sumar fuentes sin etiqueta de Chagas (ver dataset.py). El mismo
+            # clamp que en RBBB cubre el lote sin ningun registro etiquetado.
+            peso_chagas = peso * mask_chagas
+            l_chagas = (loss_chagas(logit_chagas, y_chagas) * peso_chagas).sum() / peso_chagas.sum().clamp(min=1e-8)
             # Sin registros anotados en el lote el denominador seria 0. Pasa de verdad:
             # un lote de puro SaMi-Trop/PTB-XL no tiene ni un label de RBBB.
             bce_rbbb = loss_rbbb(logit_rbbb, y_rbbb) * mask_rbbb
@@ -146,7 +152,7 @@ def predecir(modelo, loader, args, device):
     del loader. Los scores son probabilidades (sigmoid del logit)."""
     modelo.eval()
     chagas, rbbb, y_rbbb_todos, mask_todos = [], [], [], []
-    for x, _, y_rbbb, mask_rbbb, _, demo in tqdm(loader, desc="  val  ", leave=False):
+    for x, _, y_rbbb, mask_rbbb, _, demo, _ in tqdm(loader, desc="  val  ", leave=False):
         x = x.to(device, non_blocking=True)
         demo = demo.to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=args.amp and device.type == "cuda"):

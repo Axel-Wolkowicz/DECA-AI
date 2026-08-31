@@ -1189,6 +1189,100 @@ Y hay algo peor que "no mejora": **a partir de la época ~10 la corrida con paci
 
 Nota: ambas corridas de 30 épocas usan `peso_strong` por default, no el 1,0 de `abl-peso1`, así que sus AUPRC (~0,17) no son directamente comparables con el 0,1755 de `abl-peso1`. La comparación p3 vs p8 sí es limpia — es el único parámetro que cambia.
 
+### 13. `demo-lr8`: el mejor AUPRC del proyecto, y por qué todavía no lo creemos
+
+Con la caja recuperada se lanzaron dos corridas secuenciales de 30 épocas, **idénticas salvo el flag de demográficos**, ambas con lo mejor conocido hasta hoy (`peso_strong=1,0` y `--paciencia-lr 8`): `demo-lr8` (con edad y sexo) y `ctrl-lr8` (control). El código nuevo se sincronizó a mano a la caja porque estaba 3 commits atrasada (backup en `~/DECA-AI/src_backup_20260828-100526/`).
+
+**`demo-lr8` completó las 30 épocas:**
+
+| métrica | valor | época | vs `abl-peso1` |
+|---|---|---|---|
+| **AUPRC arena A** | **0,1953** | 24 | **+0,0198** |
+| **TPR@5%** | **43,5%** | 19 | **+2,1 pp** |
+| AUC arena A | 0,8475 | 16 | +0,0097 |
+
+Es el AUPRC más alto de todo el proyecto — el récord anterior era 0,1755 de `abl-peso1`. El diagnóstico de atajo se mantuvo negativo en casi todas las épocas (algún +0,002 aislado), o sea que el riesgo de que la edad funcionara como pista de origen **no se materializó**.
+
+**Por qué no se puede concluir nada todavía, con dos razones independientes:**
+
+1. **Cambian dos cosas a la vez.** Contra `abl-peso1` no solo se agregan los demográficos: también cambia la paciencia del scheduler (8 vs 3). Para eso existe `ctrl-lr8`.
+2. **Sesgo de selección por máximo sobre serie ruidosa.** El AUPRC de `demo-lr8` oscila con desvío **0,0181** entre épocas y rango total 0,0835 (de 0,1118 a 0,1953). La mejora de +0,0198 es **1,1 desvíos** — del tamaño del ruido. Y el sesgo se observó ocurriendo en vivo: mirando la corrida en la época 21 el mejor AUPRC era 0,1842, y al llegar a la 30 subió a 0,1953 **sin que el modelo mejorara** — solo hubo más tiros de los que sacar el máximo. `abl-peso1` corrió 8 épocas; quedarse con el mejor de 30 contra el mejor de 8 favorece mecánicamente a la más larga.
+
+**Regla que sale de acá y conviene aplicar de ahora en más:** comparar corridas de distinta cantidad de épocas por su *mejor* checkpoint es inválido. O se igualan las épocas, o se compara la media de las últimas N, o se reporta el máximo con su desvío.
+
+**Estado de `ctrl-lr8`: NO EXISTE todavía, y es el número que falta para cerrar esto.** Se perdió la conexión con la caja antes de que registrara una sola época (la laptop cambió de red — ver nota abajo). Se relanzó en la laptop como `ctrl-lr8-local` y se abortó a mitad de la época 1 por falta de tiempo; su carpeta en `MODELOS_DIR` quedó con el `args.json` y ningún checkpoint. **Hasta que ese control exista, `abl-peso1` (AUPRC 0,1755) sigue siendo el mejor modelo confirmado del proyecto, y el 0,1953 de `demo-lr8` no es comparable con nada.**
+
+Para retomarlo, la corrida exacta que falta es:
+
+```
+python src/train.py --epocas 30 --batch 128 --peso-strong 1.0 --paciencia-lr 8 --nombre ctrl-lr8
+```
+
+Sin `--con-demograficos`: esa es toda la diferencia contra `demo-lr8`.
+
+### 14. Qué está mirando el modelo — el score ES, en gran medida, la señal de BRD
+
+Análisis sobre los scores de validación ya guardados de `abl-peso1` (sin reentrenar nada). Responde la sospecha que dejó el paso 2 de esta sesión: que el modelo estuviera leyendo riesgo cardiovascular general en vez de Chagas.
+
+**Poder discriminante de cada señal por separado, arena A, nivel paciente:**
+
+| señal | AUC de Chagas | IC95 |
+|---|---|---|
+| score de Chagas del modelo | 0,8378 | [0,8225 – 0,8525] |
+| **la propia cabeza de RBBB del modelo** | **0,7937** | [0,7773 – 0,8093] |
+| edad sola | 0,6297 | [0,6122 – 0,6455] |
+| «ECG anormal» (etiqueta humana de CODE-15%) | 0,6209 | [0,6089 – 0,6337] |
+| sexo solo | 0,4869 | [0,4672 – 0,5044] |
+
+Correlaciones de Spearman contra el score de Chagas: **cabeza de RBBB +0,79**, edad +0,34, sexo −0,02.
+
+**Hallazgo 1 — NO es un detector de edad.** Dentro de cada franja etaria el score mantiene casi todo su poder, mientras que la edad sola se derrumba:
+
+| franja | n | AUC del score | AUC de la edad |
+|---|---|---|---|
+| <40 | 11.371 | 0,8252 | 0,7011 |
+| 40-50 | 5.000 | 0,8442 | 0,5855 |
+| 50-60 | 5.035 | 0,8267 | 0,5376 |
+| 60-70 | 5.123 | 0,7907 | 0,4392 |
+| 70+ | 8.251 | 0,8182 | 0,4677 |
+
+Si el modelo solo leyera la edad, adentro de una franja caería a ~0,5. No pasa: se mantiene en 0,79-0,84 contra el 0,8378 global. **La preocupación queda descartada con evidencia directa.**
+
+**Hallazgo 2 — el score es casi la señal de BRD, y eso es clínicamente correcto.** La cabeza de RBBB sola llega a 0,7937 de los 0,8378, con correlación 0,79 entre ambas. Preguntarle al modelo por Chagas es casi preguntarle por bloqueo de rama derecha. **No es un defecto**: el BRD es uno de los tres patrones objetivo del ROADMAP y el signo clásico de la cardiopatía chagásica — el modelo lee lo que leería un cardiólogo.
+
+Esto **reencuadra el hallazgo incómodo del paso 2** (el score predice mortalidad en población general, 0,649, pero no dentro de seropositivos, 0,457): no está detectando "corazón enfermo" en general, sino un **patrón de conducción específico**. Que ese patrón además prediga mortalidad poblacional es esperable —el BRD es marcador de riesgo conocido— sin que eso lo vuelva un detector de riesgo genérico. Lo confirma que supere con holgura a la etiqueta humana de "ECG anormal" (0,8378 vs 0,6209): no detecta "anormal", detecta algo más específico.
+
+**Hallazgo 3 — el sexo es peso muerto.** AUC 0,4869 (peor que azar) y correlación −0,02 con el score. **Consecuencia directa sobre el experimento pendiente:** de las dos variables de `--con-demograficos`, solo la edad puede estar aportando. Antes de dar por buena o mala la ablación conviene probar la variante de **solo edad**, que tiene el doble de chances de mostrar señal limpia y no gasta capacidad en una variable sin información.
+
+**Consecuencia sobre las cabezas de patrón (paso 5):** si el score ya *es* mayormente la señal de BRD, exponer esa explicación no es agregarle al modelo algo ajeno — es hacer explícito lo que ya usa. Baja el riesgo técnico de esa línea de trabajo y sube su credibilidad clínica.
+
+### 15. `chagas_mask` implementado — se destraba el paso 5
+
+Era el bloqueante que FASES.md venía marcando desde el 2026-08-26/27: la loss de Chagas **no tenía máscara**, así que cualquier fuente sin `chagas_label` entraría al entrenamiento como negativo inventado. Ahora existe.
+
+**Qué hace:** un interruptor por registro. `1.0` = tiene respuesta de Chagas, cuenta para esa loss. `0.0` = no se sabe, **no** aporta gradiente a la cabeza de Chagas, pero el registro sigue entrenando el cuerpo compartido y las cabezas de patrón. Es el mismo mecanismo que ya usaba RBBB, ahora también del lado de Chagas.
+
+**Cambios:** `dataset.py` agrega la columna `chagas_mask` en `cargar_metadata_fase4` y la devuelve como 7° elemento de la tupla de `ECGDataset`; `train.py` la aplica como `peso * mask_chagas` en numerador y denominador, con el mismo `clamp` que RBBB.
+
+**Bug latente encontrado y arreglado de paso: `pos_weight_chagas` contaba como negativo todo lo que no fuera positivo.** Como el label viene rellenado con `False`, al sumar fuentes sin etiqueta habría inflado `neg` —y con eso el `pos_weight` de los positivos— en proporción a cuántas fuentes sin etiqueta se agreguen, en silencio. Ahora pondera por la máscara.
+
+**Verificado que es un no-op hoy** (la máscara vale 1,0 en los 362.363 registros):
+
+| control | resultado |
+|---|---|
+| `chagas_mask` en el corpus | 1,0 en todos, 0 ceros |
+| `pos_weight` con vs sin máscara | 43,7416965057 en ambos, idénticos |
+| loss con vs sin máscara (datos reales) | 2,0195786953 en ambos, `torch.equal` True |
+| loss con media máscara vs calcularla solo sobre esa mitad | coinciden (`allclose`) — los no etiquetados no aportan gradiente |
+| lote sin **ningún** etiquetado | 0,0 finito, sin NaN |
+| corrida de humo completa | pasa de punta a punta |
+
+**Lo que esto habilita**, y que ahora es trabajo mecánico en vez de decisión de arquitectura: sumar Challenge 2021 (62.845 registros, ~3× más ejemplos de BRD) alimentando solo las cabezas de patrón. Combinado con el hallazgo 14 —que el score de Chagas ya *es* mayormente la señal de BRD— esa es la vía más directa que queda para mover la aguja, y además ataca el atajo de fuente por construcción: con 5 orígenes nuevos sin etiqueta de Chagas, "de qué dataset viene" deja de predecir la etiqueta.
+
+**Sigue faltando** para cerrar el paso 5: las cabezas nuevas en `model.py` (¿una por patrón, o BRD+HBAI combinado?), el merge de `challenge2021_labels.csv` en `dataset.py`, y meter Challenge 2021 a `metadata.parquet` + Fase 2 (que ahora es seguro, gracias al split congelado del hallazgo 9).
+
+**Nota operativa sobre la caja de entrenamiento:** no responde a `ping` (ICMP bloqueado) — usar `timeout 6 bash -c "echo > /dev/tcp/<ip>/22"` para saber si está viva. Su IP es DHCP; se la ubica escaneando el puerto 22 de la subred y comparando la host key ed25519 `SHA256:DX4eXyjzZfOiDipPFECQPul0DU2/xGK1bT+0DZmttz4`, que es identificación criptográfica y no admite falsos positivos. Y verificar **primero** en qué subred está la laptop: el 2026-08-28 se perdió el acceso simplemente porque la laptop pasó al WiFi "ORT" (`10.4.4.x/22`) mientras la caja seguía en `10.40.5.x`.
+
 ---
 
 ## Fase 5 — Validación y evaluación 🔲

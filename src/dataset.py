@@ -62,9 +62,10 @@ def cargar_metadata_fase4(peso_strong: float | None = None) -> pd.DataFrame:
     """fase2_metadata.parquet + label de RBBB (con mascara) + peso por confianza.
 
     Columnas agregadas:
-        rbbb_label  float32, 0.0/1.0; 0.0 tambien donde no hay dato (lo tapa la mascara)
-        rbbb_mask   float32, 1.0 si el registro tiene label de RBBB, 0.0 si no
-        peso        float32, peso de la muestra en la loss de Chagas
+        rbbb_label   float32, 0.0/1.0; 0.0 tambien donde no hay dato (lo tapa la mascara)
+        rbbb_mask    float32, 1.0 si el registro tiene label de RBBB, 0.0 si no
+        chagas_mask  float32, 1.0 si el registro tiene label de Chagas, 0.0 si no
+        peso         float32, peso de la muestra en la loss de Chagas
     """
     meta = pd.read_parquet(FASE2_METADATA_PATH)
 
@@ -80,6 +81,17 @@ def cargar_metadata_fase4(peso_strong: float | None = None) -> pd.DataFrame:
     meta["rbbb_mask"] = meta["RBBB"].notna().astype(np.float32)
     meta["rbbb_label"] = meta["RBBB"].fillna(False).astype(bool).astype(np.float32)
     meta = meta.drop(columns=["RBBB"])
+
+    # Mascara de Chagas. HOY es 1.0 en todo el corpus -- los tres datasets traen etiqueta
+    # concreta -- asi que la loss enmascarada da exactamente el mismo numero que la de
+    # antes (verificado en el __main__ de este modulo). Existe para poder sumar fuentes SIN
+    # etiqueta de Chagas (Challenge 2021, 62.845 registros con patrones anotados pero sin
+    # serologia) alimentando solo las cabezas de patron, que es lo que FASES.md propone
+    # para atacar el atajo de fuente: si "de que dataset viene" deja de predecir la
+    # etiqueta, el atajo desaparece por construccion. Sin esta mascara, un registro sin
+    # `chagas_label` entraria a la loss como negativo inventado.
+    meta["chagas_mask"] = meta["chagas_label"].notna().astype(np.float32)
+    meta["chagas_label"] = meta["chagas_label"].fillna(False)
 
     pesos = dict(PESOS_CONFIANZA)
     if peso_strong is not None:
@@ -137,11 +149,12 @@ def normalizar_demograficos(meta: pd.DataFrame) -> np.ndarray:
 
 
 class ECGDataset(Dataset):
-    """Devuelve (señal (12, 2800), chagas, rbbb, rbbb_mask, peso, demo).
+    """Devuelve (señal (12, 2800), chagas, rbbb, rbbb_mask, peso, demo, chagas_mask).
 
     `demo` es (2,) = [edad normalizada, es_hombre]. Se devuelve SIEMPRE, aunque el modelo
     corra sin demograficos (`--con-demograficos` apagado): mantener la tupla de tamanio
-    fijo evita que el desempaquetado del loop dependa de un flag.
+    fijo evita que el desempaquetado del loop dependa de un flag. Mismo criterio para
+    `chagas_mask`, que hoy vale 1.0 en todo el corpus (ver cargar_metadata_fase4).
 
     La señal se transpone de (2800, 12) a (12, 2800) porque Conv1d espera (canales,
     tiempo). El orden de las filas es el del DataFrame que se le pasa, asi que con
@@ -156,6 +169,7 @@ class ECGDataset(Dataset):
         self.chagas = self.meta["chagas_label"].to_numpy(dtype=np.float32)
         self.rbbb = self.meta["rbbb_label"].to_numpy(dtype=np.float32)
         self.rbbb_mask = self.meta["rbbb_mask"].to_numpy(dtype=np.float32)
+        self.chagas_mask = self.meta["chagas_mask"].to_numpy(dtype=np.float32)
         self.peso = self.meta["peso"].to_numpy(dtype=np.float32)
         self.demo = normalizar_demograficos(self.meta)
         self._h5 = None  # apertura perezosa: ver punto 3 del docstring del modulo
@@ -181,6 +195,7 @@ class ECGDataset(Dataset):
             torch.tensor(self.rbbb_mask[i]),
             torch.tensor(self.peso[i]),
             torch.from_numpy(self.demo[i]),
+            torch.tensor(self.chagas_mask[i]),
         )
 
     def __getstate__(self):
@@ -196,9 +211,16 @@ def pos_weight_chagas(meta: pd.DataFrame) -> float:
     Es la alternativa al oversampling decidida el 2026-08-12 (FASES.md Fase 4): reescala
     el gradiente de los positivos en vez de repetir sus grabaciones, asi que no acumula
     exposiciones a un puñado de registros.
+
+    Los registros sin etiqueta de Chagas se excluyen del conteo via `chagas_mask`. Sin eso
+    entrarian como negativos (el label viene rellenado con False) e inflarian `neg`, o sea
+    el pos_weight, en proporcion a cuantas fuentes sin etiqueta se sumen. Hoy la mascara es
+    1.0 en todo el corpus y esto no cambia ningun numero.
     """
     y = meta["chagas_label"].to_numpy(dtype=np.float32)
     w = meta["peso"].to_numpy(dtype=np.float32)
+    if "chagas_mask" in meta.columns:
+        w = w * meta["chagas_mask"].to_numpy(dtype=np.float32)
     pos, neg = float((w * y).sum()), float((w * (1 - y)).sum())
     if pos == 0:
         raise ValueError("no hay positivos en el conjunto: no se puede calcular pos_weight")
