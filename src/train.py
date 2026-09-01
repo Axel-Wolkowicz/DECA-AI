@@ -58,6 +58,7 @@ from tqdm import tqdm
 
 from config import MODELOS_DIR
 from dataset import (
+    PATRONES,
     ECGDataset,
     cargar_metadata_fase4,
     filtrar_split,
@@ -70,7 +71,9 @@ from model import ResNet1D
 
 def construir_loaders(args):
     meta = cargar_metadata_fase4(peso_strong=args.peso_strong)
-    meta_train = filtrar_split(meta, "train", con_ptbxl=args.con_ptbxl, limite=args.limit_train)
+    meta_train = filtrar_split(meta, "train", con_ptbxl=args.con_ptbxl,
+                               limite=args.limit_train,
+                               ptbxl_patrones=args.ptbxl_patrones)
     meta_val = filtrar_split(meta, "val", limite=args.limit_val)
 
     ds_train = ECGDataset(meta_train)
@@ -97,12 +100,12 @@ def construir_loaders(args):
     return meta_train, meta_val, loader_train, loader_val
 
 
-def entrenar_epoca(modelo, loader, optimizador, scaler, loss_chagas, loss_rbbb, args, device):
+def entrenar_epoca(modelo, loader, optimizador, scaler, loss_chagas, loss_rbbb, loss_patrones, args, device):
     modelo.train()
-    suma_chagas = suma_rbbb = 0.0
+    suma_chagas = suma_rbbb = suma_patrones = 0.0
     n_lotes = 0
 
-    for x, y_chagas, y_rbbb, mask_rbbb, peso, demo, mask_chagas in tqdm(loader, desc="  train", leave=False):
+    for x, y_chagas, y_rbbb, mask_rbbb, peso, demo, mask_chagas, y_pat, mask_pat in tqdm(loader, desc="  train", leave=False):
         x = x.to(device, non_blocking=True)
         demo = demo.to(device, non_blocking=True)
         mask_chagas = mask_chagas.to(device, non_blocking=True)
@@ -110,10 +113,12 @@ def entrenar_epoca(modelo, loader, optimizador, scaler, loss_chagas, loss_rbbb, 
         y_rbbb = y_rbbb.to(device, non_blocking=True)
         mask_rbbb = mask_rbbb.to(device, non_blocking=True)
         peso = peso.to(device, non_blocking=True)
+        y_pat = y_pat.to(device, non_blocking=True)
+        mask_pat = mask_pat.to(device, non_blocking=True)
 
         optimizador.zero_grad(set_to_none=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=args.amp and device.type == "cuda"):
-            logit_chagas, logit_rbbb = modelo(x, demo)
+            logit_chagas, logit_rbbb, logit_pat = modelo(x, demo)
             # Enmascarada igual que la de RBBB. Hoy `mask_chagas` es 1.0 en todo el corpus,
             # asi que este numero es identico al de antes de la mascara; el mecanismo existe
             # para poder sumar fuentes sin etiqueta de Chagas (ver dataset.py). El mismo
@@ -124,7 +129,15 @@ def entrenar_epoca(modelo, loader, optimizador, scaler, loss_chagas, loss_rbbb, 
             # un lote de puro SaMi-Trop/PTB-XL no tiene ni un label de RBBB.
             bce_rbbb = loss_rbbb(logit_rbbb, y_rbbb) * mask_rbbb
             l_rbbb = bce_rbbb.sum() / mask_rbbb.sum().clamp(min=1e-8)
-            perdida = l_chagas + args.peso_rbbb * l_rbbb
+            # Cabezas de patron: mismo esquema enmascarado, sobre (batch, n_patrones).
+            # Solo PTB-XL los trae anotados, asi que en un lote sin PTB-XL la mascara es
+            # toda 0 y el clamp devuelve 0 en vez de NaN.
+            if logit_pat.shape[1]:
+                bce_pat = loss_patrones(logit_pat, y_pat) * mask_pat
+                l_patrones = bce_pat.sum() / mask_pat.sum().clamp(min=1e-8)
+            else:
+                l_patrones = logit_chagas.new_zeros(())
+            perdida = l_chagas + args.peso_rbbb * l_rbbb + args.peso_patrones * l_patrones
 
         if not torch.isfinite(perdida):
             raise RuntimeError(
@@ -141,31 +154,40 @@ def entrenar_epoca(modelo, loader, optimizador, scaler, loss_chagas, loss_rbbb, 
 
         suma_chagas += l_chagas.detach().item()
         suma_rbbb += l_rbbb.detach().item()
+        suma_patrones += float(l_patrones.detach())
         n_lotes += 1
 
-    return suma_chagas / max(n_lotes, 1), suma_rbbb / max(n_lotes, 1)
+    d = max(n_lotes, 1)
+    return suma_chagas / d, suma_rbbb / d, suma_patrones / d
 
 
 @torch.no_grad()
 def predecir(modelo, loader, args, device):
-    """Devuelve (scores de Chagas, scores de RBBB, labels de RBBB, mascara), en el orden
+    """Devuelve (chagas, rbbb, y_rbbb, mask_rbbb, patrones, y_pat, mask_pat), en el orden
     del loader. Los scores son probabilidades (sigmoid del logit)."""
     modelo.eval()
     chagas, rbbb, y_rbbb_todos, mask_todos = [], [], [], []
-    for x, _, y_rbbb, mask_rbbb, _, demo, _ in tqdm(loader, desc="  val  ", leave=False):
+    pat, y_pat_todos, mask_pat_todos = [], [], []
+    for x, _, y_rbbb, mask_rbbb, _, demo, _, y_pat, mask_pat in tqdm(loader, desc="  val  ", leave=False):
         x = x.to(device, non_blocking=True)
         demo = demo.to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=args.amp and device.type == "cuda"):
-            logit_chagas, logit_rbbb = modelo(x, demo)
+            logit_chagas, logit_rbbb, logit_pat = modelo(x, demo)
         chagas.append(torch.sigmoid(logit_chagas.float()).cpu().numpy())
         rbbb.append(torch.sigmoid(logit_rbbb.float()).cpu().numpy())
         y_rbbb_todos.append(y_rbbb.numpy())
         mask_todos.append(mask_rbbb.numpy())
+        pat.append(torch.sigmoid(logit_pat.float()).cpu().numpy())
+        y_pat_todos.append(y_pat.numpy())
+        mask_pat_todos.append(mask_pat.numpy())
     return (
         np.concatenate(chagas),
         np.concatenate(rbbb),
         np.concatenate(y_rbbb_todos),
         np.concatenate(mask_todos),
+        np.concatenate(pat),
+        np.concatenate(y_pat_todos),
+        np.concatenate(mask_pat_todos),
     )
 
 
@@ -189,6 +211,12 @@ def main():
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--peso-rbbb", type=float, default=0.5,
                    help="peso de la cabeza de RBBB en la loss total (la de Chagas es 1.0)")
+    p.add_argument("--ptbxl-patrones", action="store_true",
+                   help="mete PTB-XL al train SOLO para las cabezas de patron (mascara de "
+                        "Chagas en 0). Vigilar el diagnostico de atajo: es el riesgo que "
+                        "motivo excluirlo (ver dataset.py)")
+    p.add_argument("--peso-patrones", type=float, default=0.5,
+                   help="peso de las cabezas de patron en la loss total")
     p.add_argument("--con-demograficos", action="store_true",
                    help="suma edad y sexo como entrada del modelo (default: apagado, "
                         "arquitectura identica a las corridas previas)")
@@ -235,6 +263,7 @@ def main():
     modelo = ResNet1D(
         dropout=args.dropout,
         n_demograficos=2 if args.con_demograficos else 0,
+        n_patrones=len(PATRONES) if args.ptbxl_patrones else 0,
     ).to(device)
     print(f"modelo: {sum(p_.numel() for p_ in modelo.parameters()):,} parametros")
 
@@ -248,6 +277,22 @@ def main():
 
     loss_chagas = nn.BCEWithLogitsLoss(reduction="none", pos_weight=torch.tensor(pw_chagas, device=device))
     loss_rbbb = nn.BCEWithLogitsLoss(reduction="none", pos_weight=torch.tensor(pw_rbbb, device=device))
+    # Un pos_weight por patron: son mucho mas raros que RBBB y muy distintos entre si
+    # (en PTB-XL, HBAI ~7% pero aneurisma ~0,5%), asi que un peso comun los trataria mal.
+    if args.ptbxl_patrones:
+        pw_pat = []
+        for patron in PATRONES:
+            m = meta_train[f"{patron}_mask"].to_numpy()
+            y = meta_train[f"{patron}_label"].to_numpy()
+            pos = float((m * y).sum())
+            neg = float((m * (1 - y)).sum())
+            pw_pat.append(neg / pos if pos > 0 else 1.0)
+        print("pos_weight patrones: " + "  ".join(f"{p_}={w:.1f}" for p_, w in zip(PATRONES, pw_pat)))
+        loss_patrones = nn.BCEWithLogitsLoss(
+            reduction="none", pos_weight=torch.tensor(pw_pat, device=device, dtype=torch.float32)
+        )
+    else:
+        loss_patrones = None
     optimizador = torch.optim.Adam(modelo.parameters(), lr=args.lr)
     planificador = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizador, mode="max", factor=args.factor_lr, patience=args.paciencia_lr
@@ -278,23 +323,37 @@ def main():
     for epoca in range(epoca_inicio, args.epocas + 1):
         t0 = time.time()
         print(f"\nEpoca {epoca}/{args.epocas}")
-        l_chagas, l_rbbb = entrenar_epoca(
-            modelo, loader_train, optimizador, scaler, loss_chagas, loss_rbbb, args, device
+        l_chagas, l_rbbb, l_patrones = entrenar_epoca(
+            modelo, loader_train, optimizador, scaler, loss_chagas, loss_rbbb,
+            loss_patrones, args, device
         )
-        s_chagas, s_rbbb, y_rbbb, mask_rbbb = predecir(modelo, loader_val, args, device)
+        s_chagas, s_rbbb, y_rbbb, mask_rbbb, s_pat, y_pat, mask_pat = predecir(
+            modelo, loader_val, args, device
+        )
 
         res = evaluar_arenas(meta_val, s_chagas)
         ap_rbbb = auprc_rbbb(s_rbbb, y_rbbb, mask_rbbb)
         dur = time.time() - t0
 
-        print(f"  loss  chagas {l_chagas:.4f}  rbbb {l_rbbb:.4f}   ({dur/60:.1f} min)")
+        ap_patrones = {}
+        if s_pat.shape[1]:
+            for j, patron in enumerate(PATRONES):
+                ap_patrones[patron] = auprc_rbbb(s_pat[:, j], y_pat[:, j], mask_pat[:, j])
+
+        print(f"  loss  chagas {l_chagas:.4f}  rbbb {l_rbbb:.4f}"
+              + (f"  patrones {l_patrones:.4f}" if ap_patrones else "")
+              + f"   ({dur/60:.1f} min)")
         print(formatear(res))
         print(f"  cabeza RBBB: AUPRC {ap_rbbb:.4f}  (se reporta aparte, nunca sumada a la de Chagas)")
+        if ap_patrones:
+            print("  cabezas de patron: "
+                  + "  ".join(f"{k} {v_:.4f}" for k, v_ in ap_patrones.items()))
 
         ap_arena_a = res.get("arena_A", {}).get("auprc", float("nan"))
         historia.append({
             "epoca": epoca, "loss_chagas": l_chagas, "loss_rbbb": l_rbbb,
-            "auprc_rbbb": ap_rbbb, "segundos": dur, "arenas": res,
+            "auprc_rbbb": ap_rbbb, "loss_patrones": l_patrones,
+            "auprc_patrones": ap_patrones, "segundos": dur, "arenas": res,
         })
         (dir_corrida / "historia.json").write_text(json.dumps(historia, indent=2), encoding="utf-8")
 

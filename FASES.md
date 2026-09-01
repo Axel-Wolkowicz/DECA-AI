@@ -1210,15 +1210,48 @@ Es el AUPRC más alto de todo el proyecto — el récord anterior era 0,1755 de 
 
 **Regla que sale de acá y conviene aplicar de ahora en más:** comparar corridas de distinta cantidad de épocas por su *mejor* checkpoint es inválido. O se igualan las épocas, o se compara la media de las últimas N, o se reporta el máximo con su desvío.
 
-**Estado de `ctrl-lr8`: NO EXISTE todavía, y es el número que falta para cerrar esto.** Se perdió la conexión con la caja antes de que registrara una sola época (la laptop cambió de red — ver nota abajo). Se relanzó en la laptop como `ctrl-lr8-local` y se abortó a mitad de la época 1 por falta de tiempo; su carpeta en `MODELOS_DIR` quedó con el `args.json` y ningún checkpoint. **Hasta que ese control exista, `abl-peso1` (AUPRC 0,1755) sigue siendo el mejor modelo confirmado del proyecto, y el 0,1953 de `demo-lr8` no es comparable con nada.**
+**`ctrl-lr8` SÍ completó las 30 épocas** (terminó 11:04), aunque se hubiera perdido la conexión con la caja: se había lanzado con `nohup setsid`, así que sobrevivió. Se recuperó a las 13:52 al volver la laptop a la subred correcta. Veredicto abajo.
 
-Para retomarlo, la corrida exacta que falta es:
+### 13b. VEREDICTO: edad y sexo NO sirven, y en la métrica operativa empeoran
 
-```
-python src/train.py --epocas 30 --batch 128 --peso-strong 1.0 --paciencia-lr 8 --nombre ctrl-lr8
-```
+A/B limpio: 30 épocas cada una, misma semilla, config idéntica salvo `--con-demograficos`.
 
-Sin `--con-demograficos`: esa es toda la diferencia contra `demo-lr8`.
+**Por el mejor checkpoint** (válido acá, las dos corren 30 épocas):
+
+| | AUPRC | AUC | TPR@5% |
+|---|---|---|---|
+| `demo-lr8` (con) | **0,1953** (ép.24) | 0,8475 | 43,5% |
+| `ctrl-lr8` (sin) | 0,1735 (ép.20) | **0,8484** | **44,3%** |
+| delta | +0,0219 | −0,0009 | **−0,8 pp** |
+
+Las métricas **se contradicen entre sí** — gana en una y pierde en las otras dos. Eso ya es señal de ruido, no de efecto.
+
+**Por promedios, que es la comparación robusta:**
+
+| | AUPRC últimas 10 | AUPRC las 30 |
+|---|---|---|
+| `demo-lr8` (con) | 0,1643 ±0,0164 | 0,1598 ±0,0181 |
+| `ctrl-lr8` (sin) | 0,1646 ±0,0037 | 0,1596 ±0,0109 |
+| delta | **−0,0003** | **+0,0001** |
+
+Empate perfecto. Y ojo al desvío: `demo-lr8` es **1,7× más ruidosa** (0,0181 vs 0,0109). Ahí está la explicación completa del "récord" de 0,1953 — no es un modelo mejor, es la misma media con más varianza, y el máximo de una serie más ruidosa es más alto. **Exactamente el sesgo de selección que se había advertido, ahora confirmado con el control.**
+
+**Época contra época (apareadas, misma semilla):**
+
+| métrica | gana `demo` | diferencia media | t apareado |
+|---|---|---|---|
+| AUPRC | 15/30 | +0,0001 | **+0,04** |
+| **TPR@5%** | **7/30** | **−0,99 pp** | **−3,55** |
+
+En AUPRC el efecto es **exactamente nulo** (t = 0,04, no se puede pedir un cero más limpio). En **TPR@5% la diferencia sí es significativa** (|t| = 3,55 > 2,05) **y es negativa**: con demográficos gana solo 7 de 30 épocas. En la métrica que decidimos que es la operativamente correcta, edad y sexo **empeoran** el modelo.
+
+**Conclusión: el paso 4 queda cerrado con un no.** Coherente con el hallazgo 14 medido el mismo día: el sexo tiene AUC 0,4869 (peor que azar) y correlación −0,02 con el score, o sea que es peso muerto puro; y la edad, aunque discrimina algo sola (0,6297), no aporta nada que el modelo no extraiga ya del trazado — se comprobó que dentro de cada franja etaria el score conserva su poder. Meterlas gasta capacidad y agrega varianza sin traer información nueva.
+
+**Queda una variante sin probar**: solo edad, sin sexo. El hallazgo 14 sugiere que es la única de las dos que podría aportar. Prioridad baja — el efecto conjunto ya salió nulo o negativo.
+
+**El mejor modelo por la métrica operativa pasa a ser `ctrl-lr8`, con TPR@5% 44,3%**, aunque esa comparación contra `abl-peso1` (41,4%) arrastra el mismo sesgo de máximo sobre 30 vs 8 épocas, así que no es limpia. Lo que sí es limpio es que `ctrl-lr8` ≥ `demo-lr8`.
+
+Nota menor: el diagnóstico de atajo promedió −0,0130 en el control contra −0,0066 con demográficos, o sea que las variables demográficas además acercan levemente al modelo al atajo de fuente. Consistente con el riesgo anotado al implementarlas (las edades medias difieren por dataset).
 
 ### 14. Qué está mirando el modelo — el score ES, en gran medida, la señal de BRD
 

@@ -50,12 +50,55 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from config import CODE15_EXAMS_CSV, FASE2_HDF5, FASE2_METADATA_PATH
+from config import CODE15_EXAMS_CSV, FASE2_HDF5, FASE2_METADATA_PATH, PTBXL_DATABASE_CSV
 
 # Pesos por tier de confianza de la etiqueta (columna `confianza` de metadata).
 # El 1.0 de `strong` esta argumentado con numeros en el docstring del modulo.
 PESO_STRONG = 1.0
 PESOS_CONFIANZA = {"weak": 1.0, "strong": PESO_STRONG, "negativo-presunto": 1.0}
+
+# Los 3 patrones objetivo del ROADMAP, en el vocabulario SCP de PTB-XL (medido en
+# FASES.md, hallazgo 5 del 2026-08-26). PTB-XL es la fuente MAS rica del patron mas
+# escaso: 1.623 HBAI contra los 500 de Challenge 2021 entero, y 284 casos de BRD+HBAI
+# simultaneos contra 101. Y ya esta preprocesada en Fase 2, asi que no cuesta nada.
+#
+# El 4o patron (BRD) NO va aca: ya tiene su propia cabeza alimentada por code15/exams.csv.
+# Se le suma PTB-XL via CRBBB -- y solo CRBBB, no IRBBB, porque la columna RBBB de
+# CODE-15% es bloqueo COMPLETO y mezclarle incompletos le cambiaria el significado a una
+# cabeza que ya esta validada (AUPRC 0,79) y es comparable entre corridas.
+PATRONES = ("hbai", "extra", "zona")
+SCP_A_PATRON = {
+    "LAFB": "hbai",      # hemibloqueo anterior izquierdo -- la mitad escasa del patron clasico
+    "PVC": "extra",      # extrasistoles ventriculares
+    "BIGU": "extra",     # bigeminismo: por definicion, secuencia de extrasistoles
+    "TRIGU": "extra",    # trigeminismo: idem
+    "PRC(S)": "extra",   # contraccion prematura (supra)ventricular anotada como tal
+    "ANEUR": "zona",     # aneurisma ventricular = zona electricamente inactiva (ROADMAP)
+}
+SCP_BRD_PTBXL = ("CRBBB",)  # ver comentario de arriba: completo solamente
+
+
+def _patrones_ptbxl() -> pd.DataFrame:
+    """(dataset, record_id, <patron>_label..., brd_ptbxl) desde el vocabulario SCP.
+
+    `scp_codes` viene como el repr de un dict de Python ({'NORM': 100.0, ...}), asi que
+    hay que evaluarlo. Se usa ast.literal_eval y no eval: el archivo es de terceros.
+    """
+    import ast
+
+    db = pd.read_csv(PTBXL_DATABASE_CSV, usecols=["ecg_id", "scp_codes"])
+    codigos = db["scp_codes"].apply(ast.literal_eval)
+
+    out = pd.DataFrame({"record_id": db["ecg_id"].astype(str), "dataset": "ptbxl"})
+    for patron in PATRONES:
+        quiere = {c for c, p in SCP_A_PATRON.items() if p == patron}
+        out[f"{patron}_label"] = codigos.apply(
+            lambda d, q=quiere: float(any(c in d for c in q))
+        ).astype(np.float32)
+    out["brd_ptbxl"] = codigos.apply(
+        lambda d: float(any(c in d for c in SCP_BRD_PTBXL))
+    ).astype(np.float32)
+    return out
 
 
 def cargar_metadata_fase4(peso_strong: float | None = None) -> pd.DataFrame:
@@ -65,6 +108,8 @@ def cargar_metadata_fase4(peso_strong: float | None = None) -> pd.DataFrame:
         rbbb_label   float32, 0.0/1.0; 0.0 tambien donde no hay dato (lo tapa la mascara)
         rbbb_mask    float32, 1.0 si el registro tiene label de RBBB, 0.0 si no
         chagas_mask  float32, 1.0 si el registro tiene label de Chagas, 0.0 si no
+        <patron>_label / <patron>_mask  float32, para cada uno de PATRONES (solo PTB-XL
+                     los tiene anotados; en el resto la mascara es 0)
         peso         float32, peso de la muestra en la loss de Chagas
     """
     meta = pd.read_parquet(FASE2_METADATA_PATH)
@@ -93,6 +138,24 @@ def cargar_metadata_fase4(peso_strong: float | None = None) -> pd.DataFrame:
     meta["chagas_mask"] = meta["chagas_label"].notna().astype(np.float32)
     meta["chagas_label"] = meta["chagas_label"].fillna(False)
 
+    # Patrones del ROADMAP desde el vocabulario SCP de PTB-XL. La clave del merge lleva
+    # `dataset` por la misma razon que la de RBBB: los record_id colisionan entre fuentes.
+    pat = _patrones_ptbxl()
+    meta = meta.merge(pat, on=["dataset", "record_id"], how="left")
+    for patron in PATRONES:
+        col = f"{patron}_label"
+        meta[f"{patron}_mask"] = meta[col].notna().astype(np.float32)
+        meta[col] = meta[col].fillna(0.0).astype(np.float32)
+
+    # BRD de PTB-XL entra a la cabeza de RBBB que ya existe, en vez de abrir una nueva:
+    # es el mismo hallazgo clinico y le duplica los ejemplos anotados.
+    tiene_brd = meta["brd_ptbxl"].notna()
+    meta.loc[tiene_brd, "rbbb_label"] = meta.loc[tiene_brd, "brd_ptbxl"].astype(np.float32)
+    meta.loc[tiene_brd, "rbbb_mask"] = np.float32(1.0)
+    meta = meta.drop(columns=["brd_ptbxl"])
+    meta["rbbb_label"] = meta["rbbb_label"].astype(np.float32)
+    meta["rbbb_mask"] = meta["rbbb_mask"].astype(np.float32)
+
     pesos = dict(PESOS_CONFIANZA)
     if peso_strong is not None:
         pesos["strong"] = peso_strong
@@ -110,14 +173,27 @@ def filtrar_split(
     con_ptbxl: bool = False,
     limite: int | None = None,
     seed: int = 42,
+    ptbxl_patrones: bool = False,
 ) -> pd.DataFrame:
     """Subconjunto de un split. `con_ptbxl` solo aplica a train (val/test siempre lo llevan:
     es la arena C). `limite` toma una muestra ALEATORIA, no las primeras N filas: el
     parquet viene ordenado por (dataset, source_file) desde preprocess.py, asi que las
-    primeras N serian todas de code15/exams_part0 y ademas casi todas negativas."""
+    primeras N serian todas de code15/exams_part0 y ademas casi todas negativas.
+
+    `ptbxl_patrones` mete PTB-XL al train **con la mascara de Chagas en 0**: alimenta las
+    cabezas de patron (donde es la fuente mas rica del label mas escaso) sin aportar ni un
+    gradiente que diga "PTB-XL -> negativo de Chagas". Es la mitigacion que FASES.md
+    propone para poder usarlo sin reabrir el atajo de fuente que motivo excluirlo; el
+    riesgo residual --que el cuerpo compartido codifique el origen igual-- **no esta
+    resuelto a priori y se decide mirando el diagnostico de atajo**, no razonandolo.
+    Es distinto de `con_ptbxl`, que lo mete entero, Chagas incluido (ablacion inversa)."""
     sub = meta[meta["split"] == split]
     if split == "train" and not con_ptbxl:
-        sub = sub[sub["dataset"] != "ptbxl"]
+        if ptbxl_patrones:
+            sub = sub.copy()
+            sub.loc[sub["dataset"] == "ptbxl", "chagas_mask"] = np.float32(0.0)
+        else:
+            sub = sub[sub["dataset"] != "ptbxl"]
     if limite is not None and limite < len(sub):
         sub = sub.sample(n=limite, random_state=seed)
     return sub.reset_index(drop=True)
@@ -149,7 +225,11 @@ def normalizar_demograficos(meta: pd.DataFrame) -> np.ndarray:
 
 
 class ECGDataset(Dataset):
-    """Devuelve (señal (12, 2800), chagas, rbbb, rbbb_mask, peso, demo, chagas_mask).
+    """Devuelve (señal, chagas, rbbb, rbbb_mask, peso, demo, chagas_mask, patrones, patrones_mask).
+
+    `patrones` y `patrones_mask` son (len(PATRONES),) y van agrupados en un solo tensor en
+    vez de un elemento por patron: asi agregar un patron nuevo no cambia el tamanio de la
+    tupla ni el desempaquetado de los loops de train.py.
 
     `demo` es (2,) = [edad normalizada, es_hombre]. Se devuelve SIEMPRE, aunque el modelo
     corra sin demograficos (`--con-demograficos` apagado): mantener la tupla de tamanio
@@ -172,6 +252,12 @@ class ECGDataset(Dataset):
         self.chagas_mask = self.meta["chagas_mask"].to_numpy(dtype=np.float32)
         self.peso = self.meta["peso"].to_numpy(dtype=np.float32)
         self.demo = normalizar_demograficos(self.meta)
+        self.patrones = np.stack(
+            [self.meta[f"{p}_label"].to_numpy(dtype=np.float32) for p in PATRONES], axis=1
+        )
+        self.patrones_mask = np.stack(
+            [self.meta[f"{p}_mask"].to_numpy(dtype=np.float32) for p in PATRONES], axis=1
+        )
         self._h5 = None  # apertura perezosa: ver punto 3 del docstring del modulo
 
     def __len__(self) -> int:
@@ -196,6 +282,8 @@ class ECGDataset(Dataset):
             torch.tensor(self.peso[i]),
             torch.from_numpy(self.demo[i]),
             torch.tensor(self.chagas_mask[i]),
+            torch.from_numpy(self.patrones[i]),
+            torch.from_numpy(self.patrones_mask[i]),
         )
 
     def __getstate__(self):

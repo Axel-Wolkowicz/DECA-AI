@@ -66,6 +66,7 @@ class ResNet1D(nn.Module):
         canales_stem: int = 64,
         dropout: float = 0.2,
         n_demograficos: int = 0,
+        n_patrones: int = 0,
     ):
         super().__init__()
         self.stem = nn.Sequential(
@@ -89,9 +90,19 @@ class ResNet1D(nn.Module):
         n_entrada = self.n_features + n_demograficos
         self.cabeza_chagas = nn.Linear(n_entrada, 1)
         self.cabeza_rbbb = nn.Linear(n_entrada, 1)
+        # Una sola Linear de n_patrones salidas, no n_patrones Linear de 1: es identico
+        # matematicamente (no comparten nada mas que la entrada) y hace que agregar un
+        # patron no cambie la forma del state_dict mas que en una dimension.
+        # n_patrones=0 deja el modelo byte a byte igual al de todas las corridas previas.
+        self.n_patrones = n_patrones
+        self.cabeza_patrones = nn.Linear(n_entrada, n_patrones) if n_patrones else None
 
     def forward(self, x, demo=None):
-        """x: (batch, 12, 2800) -> (logit_chagas, logit_rbbb), cada uno (batch,).
+        """x: (batch, 12, 2800) -> (logit_chagas, logit_rbbb, logit_patrones).
+
+        Los dos primeros son (batch,); `logit_patrones` es (batch, n_patrones), o un
+        tensor vacio (batch, 0) si el modelo se construyo sin cabezas de patron. Se
+        devuelven SIEMPRE tres valores para que el desempaquetado no dependa de un flag.
 
         `demo` es (batch, n_demograficos) y solo se usa si el modelo se construyo con
         n_demograficos > 0; si no, se ignora.
@@ -104,7 +115,12 @@ class ResNet1D(nn.Module):
                     "pero forward() recibio demo=None"
                 )
             h = torch.cat([h, demo.to(h.dtype)], dim=1)
-        return self.cabeza_chagas(h).squeeze(-1), self.cabeza_rbbb(h).squeeze(-1)
+        patrones = (
+            self.cabeza_patrones(h)
+            if self.cabeza_patrones is not None
+            else h.new_zeros((h.shape[0], 0))
+        )
+        return self.cabeza_chagas(h).squeeze(-1), self.cabeza_rbbb(h).squeeze(-1), patrones
 
 
 if __name__ == "__main__":
@@ -114,5 +130,5 @@ if __name__ == "__main__":
     print(f"features antes de las cabezas: {modelo.n_features}")
 
     x = torch.randn(4, 12, 2800)
-    chagas, rbbb = modelo(x)
+    chagas, rbbb, patrones = modelo(x)
     print(f"entrada {tuple(x.shape)} -> chagas {tuple(chagas.shape)}, rbbb {tuple(rbbb.shape)}")
