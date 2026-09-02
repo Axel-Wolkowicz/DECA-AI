@@ -50,12 +50,21 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from config import CODE15_EXAMS_CSV, FASE2_HDF5, FASE2_METADATA_PATH, PTBXL_DATABASE_CSV
+from config import (
+    CHALLENGE2021_LABELS_CSV,
+    CODE15_EXAMS_CSV,
+    FASE2_HDF5,
+    FASE2_METADATA_PATH,
+    PTBXL_DATABASE_CSV,
+)
 
 # Pesos por tier de confianza de la etiqueta (columna `confianza` de metadata).
 # El 1.0 de `strong` esta argumentado con numeros en el docstring del modulo.
 PESO_STRONG = 1.0
-PESOS_CONFIANZA = {"weak": 1.0, "strong": PESO_STRONG, "negativo-presunto": 1.0}
+# "sin-etiqueta" (Challenge 2021) lleva peso 1.0 pero es indiferente: su chagas_mask
+# es 0, asi que nunca entra ni a la loss de Chagas ni al conteo de pos_weight.
+PESOS_CONFIANZA = {"weak": 1.0, "strong": PESO_STRONG, "negativo-presunto": 1.0,
+                   "sin-etiqueta": 1.0}
 
 # Los 3 patrones objetivo del ROADMAP, en el vocabulario SCP de PTB-XL (medido en
 # FASES.md, hallazgo 5 del 2026-08-26). PTB-XL es la fuente MAS rica del patron mas
@@ -76,6 +85,47 @@ SCP_A_PATRON = {
     "ANEUR": "zona",     # aneurisma ventricular = zona electricamente inactiva (ROADMAP)
 }
 SCP_BRD_PTBXL = ("CRBBB",)  # ver comentario de arriba: completo solamente
+
+# Challenge 2021 usa SNOMED, no SCP, asi que trae sus propias columnas ya parseadas por
+# convert_challenge2021.py. El mapeo a nuestros 3 patrones:
+#   hbai -> hbai   (LAnFB, misma entidad que el LAFB de PTB-XL)
+#   pvc  -> extra  (extrasistoles ventriculares)
+#   qab  -> zona   (ver la salvedad de abajo)
+#   brd  -> cabeza de RBBB, igual que el CRBBB de PTB-XL
+#   prwp -> sin usar: la mala progresion de onda R no es ninguno de los 3 patrones del
+#           ROADMAP, y meterla en `zona` ensancharia el significado sin respaldo clinico.
+#
+# **Salvedad sobre `zona`, que es una decision de etiquetado y conviene revisar.** En
+# PTB-XL ese patron es `ANEUR` (cambios ST-T compatibles con aneurisma ventricular, 104
+# registros); en Challenge 2021 es `qab` (onda Q anormal, 1.406). No son sinonimos
+# exactos: la onda Q anormal es el SIGNO de una zona electricamente inactiva y el
+# aneurisma es una CAUSA de ella. El objetivo del ROADMAP es "zonas electricamente
+# inactivas", asi que la union se acerca mas al objetivo clinico que el ANEUR solo -- pero
+# el precio es que la cabeza aprende un concepto un poco distinto segun la fuente, lo que
+# en el limite es una pista de origen. Si el diagnostico de atajo empeora al sumar
+# Challenge 2021, esta es la primera sospechosa.
+PATRON_A_COLUMNA_C2021 = {"hbai": "hbai", "extra": "pvc", "zona": "qab"}
+# BRD completo: CRBBB (713427006) o RBBB (59118001), que el challenge puntua como la misma
+# entidad. Se EXCLUYE IRBBB (713426002) por la misma razon que en PTB-XL -- la columna
+# RBBB de CODE-15% es bloqueo completo. Son 583 registros que quedan afuera.
+SNOMED_BRD_COMPLETO = {"713427006", "59118001"}
+
+
+def _patrones_challenge2021() -> pd.DataFrame:
+    """(dataset, record_id, <patron>_label..., brd_c2021) desde challenge2021_labels.csv."""
+    lab = pd.read_csv(
+        CHALLENGE2021_LABELS_CSV,
+        usecols=["record_id", "dx_codigos", *PATRON_A_COLUMNA_C2021.values()],
+    )
+    out = pd.DataFrame({"record_id": lab["record_id"].astype(str), "dataset": "challenge2021"})
+    for patron, columna in PATRON_A_COLUMNA_C2021.items():
+        out[f"{patron}_label"] = lab[columna].astype(bool).astype(np.float32)
+
+    codigos = lab["dx_codigos"].fillna("").astype(str).str.split(";")
+    out["brd_c2021"] = codigos.apply(
+        lambda l: float(any(c.strip() in SNOMED_BRD_COMPLETO for c in l))
+    ).astype(np.float32)
+    return out
 
 
 def _patrones_ptbxl() -> pd.DataFrame:
@@ -140,7 +190,7 @@ def cargar_metadata_fase4(peso_strong: float | None = None) -> pd.DataFrame:
 
     # Patrones del ROADMAP desde el vocabulario SCP de PTB-XL. La clave del merge lleva
     # `dataset` por la misma razon que la de RBBB: los record_id colisionan entre fuentes.
-    pat = _patrones_ptbxl()
+    pat = pd.concat([_patrones_ptbxl(), _patrones_challenge2021()], ignore_index=True)
     meta = meta.merge(pat, on=["dataset", "record_id"], how="left")
     for patron in PATRONES:
         col = f"{patron}_label"
@@ -149,10 +199,11 @@ def cargar_metadata_fase4(peso_strong: float | None = None) -> pd.DataFrame:
 
     # BRD de PTB-XL entra a la cabeza de RBBB que ya existe, en vez de abrir una nueva:
     # es el mismo hallazgo clinico y le duplica los ejemplos anotados.
-    tiene_brd = meta["brd_ptbxl"].notna()
-    meta.loc[tiene_brd, "rbbb_label"] = meta.loc[tiene_brd, "brd_ptbxl"].astype(np.float32)
-    meta.loc[tiene_brd, "rbbb_mask"] = np.float32(1.0)
-    meta = meta.drop(columns=["brd_ptbxl"])
+    for col in ("brd_ptbxl", "brd_c2021"):
+        tiene_brd = meta[col].notna()
+        meta.loc[tiene_brd, "rbbb_label"] = meta.loc[tiene_brd, col].astype(np.float32)
+        meta.loc[tiene_brd, "rbbb_mask"] = np.float32(1.0)
+    meta = meta.drop(columns=["brd_ptbxl", "brd_c2021"])
     meta["rbbb_label"] = meta["rbbb_label"].astype(np.float32)
     meta["rbbb_mask"] = meta["rbbb_mask"].astype(np.float32)
 
@@ -174,6 +225,7 @@ def filtrar_split(
     limite: int | None = None,
     seed: int = 42,
     ptbxl_patrones: bool = False,
+    con_challenge2021: bool = False,
 ) -> pd.DataFrame:
     """Subconjunto de un split. `con_ptbxl` solo aplica a train (val/test siempre lo llevan:
     es la arena C). `limite` toma una muestra ALEATORIA, no las primeras N filas: el
@@ -186,8 +238,17 @@ def filtrar_split(
     propone para poder usarlo sin reabrir el atajo de fuente que motivo excluirlo; el
     riesgo residual --que el cuerpo compartido codifique el origen igual-- **no esta
     resuelto a priori y se decide mirando el diagnostico de atajo**, no razonandolo.
-    Es distinto de `con_ptbxl`, que lo mete entero, Chagas incluido (ablacion inversa)."""
+    Es distinto de `con_ptbxl`, que lo mete entero, Chagas incluido (ablacion inversa).
+
+    `con_challenge2021` gobierna las 43.883 grabaciones de Challenge 2021 en train, y esta
+    APAGADO por default a proposito: sin el flag, una corrida sin argumentos entrena sobre
+    los mismos 238.027 registros que todas las corridas historicas y sigue siendo
+    comparable con ellas. Con el flag prendido son 281.910, y esos registros alimentan solo
+    las cabezas de patron y la de RBBB (su chagas_mask es 0). En val/test SIEMPRE estan:
+    ahi no hacen dano y sirven para medir las cabezas de patron."""
     sub = meta[meta["split"] == split]
+    if split == "train" and not con_challenge2021:
+        sub = sub[sub["dataset"] != "challenge2021"]
     if split == "train" and not con_ptbxl:
         if ptbxl_patrones:
             sub = sub.copy()

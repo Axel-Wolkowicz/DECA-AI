@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from config import CODE15_DIR, METADATA_PATH, PTBXL_HDF5, SAMITROP_HDF5
+from config import CHALLENGE2021_HDF5, CODE15_DIR, METADATA_PATH, PTBXL_HDF5, SAMITROP_HDF5
 
 LEADS = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
 
@@ -25,6 +25,8 @@ def path_para(dataset: str, source_file: str):
         return SAMITROP_HDF5
     if dataset == "ptbxl":
         return PTBXL_HDF5
+    if dataset == "challenge2021":
+        return CHALLENGE2021_HDF5
     raise ValueError(f"dataset desconocido: {dataset}")
 
 

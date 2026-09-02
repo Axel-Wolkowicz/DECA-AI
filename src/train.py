@@ -73,7 +73,8 @@ def construir_loaders(args):
     meta = cargar_metadata_fase4(peso_strong=args.peso_strong)
     meta_train = filtrar_split(meta, "train", con_ptbxl=args.con_ptbxl,
                                limite=args.limit_train,
-                               ptbxl_patrones=args.ptbxl_patrones)
+                               ptbxl_patrones=args.ptbxl_patrones,
+                               con_challenge2021=args.con_challenge2021)
     meta_val = filtrar_split(meta, "val", limite=args.limit_val)
 
     ds_train = ECGDataset(meta_train)
@@ -211,6 +212,11 @@ def main():
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--peso-rbbb", type=float, default=0.5,
                    help="peso de la cabeza de RBBB en la loss total (la de Chagas es 1.0)")
+    p.add_argument("--con-challenge2021", action="store_true",
+                   help="suma las 43.883 grabaciones de Challenge 2021 al train (solo "
+                        "cabezas de patron y RBBB; no tienen etiqueta de Chagas). Apagado "
+                        "por default para que una corrida sin flags siga siendo comparable "
+                        "con las historicas")
     p.add_argument("--ptbxl-patrones", action="store_true",
                    help="mete PTB-XL al train SOLO para las cabezas de patron (mascara de "
                         "Chagas en 0). Vigilar el diagnostico de atajo: es el riesgo que "
@@ -263,7 +269,7 @@ def main():
     modelo = ResNet1D(
         dropout=args.dropout,
         n_demograficos=2 if args.con_demograficos else 0,
-        n_patrones=len(PATRONES) if args.ptbxl_patrones else 0,
+        n_patrones=len(PATRONES) if (args.ptbxl_patrones or args.con_challenge2021) else 0,
     ).to(device)
     print(f"modelo: {sum(p_.numel() for p_ in modelo.parameters()):,} parametros")
 

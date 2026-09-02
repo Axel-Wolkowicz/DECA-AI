@@ -2,7 +2,7 @@
 
 Columnas de salida:
     record_id   - id de registro, unico dentro del dataset de origen
-    dataset     - 'code15' | 'samitrop' | 'ptbxl'
+    dataset     - 'code15' | 'samitrop' | 'ptbxl' | 'challenge2021'
     patient_id  - id de paciente. En SaMi-Trop no existe en la fuente (no hay columna de
                   paciente en exams.csv); se usa record_id como proxy, asumiendo 1 examen
                   por paciente (verificado: sin exam_id duplicados). Necesario para el
@@ -15,8 +15,14 @@ Columnas de salida:
     sexo        - 'M' | 'F'
     frecuencia  - Hz
     duracion    - segundos
-    chagas_label - True/False/None (None = sin dato)
-    confianza   - 'weak' (autorreportada) | 'strong' (serologica) | 'negativo-presunto'
+    chagas_label - True/False/<NA> (<NA> = sin dato). **Tipo 'boolean' de pandas, no bool
+                  de numpy**: Challenge 2021 no tiene serologia y necesita ser nulo, no
+                  False. Con el dtype nullable, `.any()` en split_patients ignora los
+                  nulos (skipna) y esos pacientes se estratifican como negativos en vez
+                  de como positivos -- que es lo que pasaria con un NaN de numpy, porque
+                  en Python bool(nan) es True.
+    confianza   - 'weak' (autorreportada) | 'strong' (serologica) | 'negativo-presunto' |
+                  'sin-etiqueta' (Challenge 2021: solo aporta patrones, nunca Chagas)
 
 Uso: python src/build_metadata.py
 """
@@ -25,6 +31,8 @@ import numpy as np
 import pandas as pd
 
 from config import (
+    CHALLENGE2021_HDF5,
+    CHALLENGE2021_LABELS_CSV,
     CODE15_DIR,
     CODE15_EXAMS_CSV,
     CODE15_LABELS_CSV,
@@ -153,13 +161,64 @@ def build_ptbxl():
     })
 
 
+def build_challenge2021():
+    """PhysioNet/CinC Challenge 2021: patrones anotados, SIN etiqueta de Chagas.
+
+    Entra al corpus para alimentar las cabezas de patron (ver dataset.py). `chagas_label`
+    queda en <NA> a proposito: la mascara de Chagas lo excluye de esa loss en vez de
+    contarlo como negativo inventado. Sin `patient_id` en la fuente, se usa record_id como
+    proxy -- mismo criterio que SaMi-Trop, y aca es correcto porque cada registro de
+    Challenge 2021 es de un paciente distinto.
+    """
+    for path in (CHALLENGE2021_HDF5, CHALLENGE2021_LABELS_CSV):
+        if not path.exists():
+            print(f"Challenge 2021: falta {path} -> se omite (correr convert_challenge2021.py)")
+            return None
+
+    lab = pd.read_csv(CHALLENGE2021_LABELS_CSV)
+
+    # row_index sale del CSV, que lo escribio el conversor recorriendo tracings en orden.
+    # Se verifica igual que en PTB-XL: si no coincidiera, cada señal quedaria pegada a la
+    # demografia de otro paciente sin que nada falle.
+    with h5py.File(CHALLENGE2021_HDF5, "r") as f:
+        n_hdf5 = f["tracings"].shape[0]
+    if n_hdf5 != len(lab):
+        raise ValueError(
+            f"Challenge 2021: el HDF5 tiene {n_hdf5} registros y el CSV {len(lab)}. "
+            "Regenerar con convert_challenge2021.py."
+        )
+    if not np.array_equal(lab["row_index"].to_numpy(), np.arange(len(lab))):
+        raise ValueError("Challenge 2021: row_index no es 0..n-1; no se puede indexar por posicion.")
+
+    return pd.DataFrame({
+        "record_id": lab["record_id"].astype(str),
+        "dataset": "challenge2021",
+        "patient_id": lab["patient_id"].astype(str),
+        "source_file": CHALLENGE2021_HDF5.name,
+        "row_index": lab["row_index"].to_numpy(),
+        "edad": lab["edad"],
+        "sexo": lab["sexo"],
+        "frecuencia": lab["frecuencia"],
+        "duracion": 10.0,  # el conversor normaliza todo a la ventana de 5.000 muestras
+        "chagas_label": pd.array([pd.NA] * len(lab), dtype="boolean"),
+        "confianza": "sin-etiqueta",
+    })
+
+
 def main():
     parts = [build_code15(), build_samitrop()]
     ptbxl = build_ptbxl()
     if ptbxl is not None:
         parts.append(ptbxl)
 
+    c2021 = build_challenge2021()
+    if c2021 is not None:
+        parts.append(c2021)
+
     metadata = pd.concat(parts, ignore_index=True)
+    # Nullable: sin esto el concat con las columnas bool deja object, y ahi un <NA> se
+    # comporta como True en `.any()` (ver docstring del modulo).
+    metadata["chagas_label"] = metadata["chagas_label"].astype("boolean")
     metadata.to_parquet(METADATA_PATH, index=False)
 
     print(f"\nmetadata.parquet -> {METADATA_PATH}")

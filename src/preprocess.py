@@ -113,7 +113,13 @@ def main():
     descartados = Counter()  # (dataset, motivo) -> cantidad
     contador = 0
 
-    with h5py.File(FASE2_HDF5, "w") as fout:
+    # Se escribe a .tmp y recien al final se renombra. h5py con "w" trunca el archivo al
+    # instante, asi que escribir directo sobre FASE2_HDF5 significa que cualquier corte
+    # --consola cerrada, maquina apagada, disco desconectado-- destruye el dataset que ya
+    # existia (45 GB) y obliga a rehacer la Fase 2 entera. Mismo patron que usa
+    # convert_challenge2021.py.
+    tmp_path = FASE2_HDF5.with_suffix(".hdf5.tmp")
+    with h5py.File(tmp_path, "w") as fout:
         tracings_out = fout.create_dataset(
             "tracings",
             shape=(n_total, WINDOW_SAMPLES, 12),
@@ -152,6 +158,8 @@ def main():
                     contador += 1
 
         tracings_out.resize((contador, WINDOW_SAMPLES, 12))
+
+    tmp_path.replace(FASE2_HDF5)
 
     metadata_out = pd.DataFrame(filas_out)
     metadata_out.to_parquet(FASE2_METADATA_PATH, index=False)

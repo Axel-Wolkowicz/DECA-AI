@@ -1312,7 +1312,38 @@ Era el bloqueante que FASES.md venía marcando desde el 2026-08-26/27: la loss d
 
 **Lo que esto habilita**, y que ahora es trabajo mecánico en vez de decisión de arquitectura: sumar Challenge 2021 (62.845 registros, ~3× más ejemplos de BRD) alimentando solo las cabezas de patrón. Combinado con el hallazgo 14 —que el score de Chagas ya *es* mayormente la señal de BRD— esa es la vía más directa que queda para mover la aguja, y además ataca el atajo de fuente por construcción: con 5 orígenes nuevos sin etiqueta de Chagas, "de qué dataset viene" deja de predecir la etiqueta.
 
-**Sigue faltando** para cerrar el paso 5: las cabezas nuevas en `model.py` (¿una por patrón, o BRD+HBAI combinado?), el merge de `challenge2021_labels.csv` en `dataset.py`, y meter Challenge 2021 a `metadata.parquet` + Fase 2 (que ahora es seguro, gracias al split congelado del hallazgo 9).
+**Sigue faltando** para cerrar el paso 5: el merge de `challenge2021_labels.csv` en `dataset.py` (las cabezas y el alta en `metadata.parquet` ya están, ver hallazgos 16 y 17).
+
+### 16. Etapa A del paso 5: cabezas de patrón alimentadas por PTB-XL
+
+Las cabezas nuevas cubren los 3 patrones del ROADMAP con el vocabulario SCP de PTB-XL: `hbai` (LAFB), `extra` (PVC/BIGU/TRIGU/PRC(S)) y `zona` (ANEUR, el aneurisma ventricular). Conteos verificados contra el hallazgo 5: **HBAI 1.623, extrasístoles 1.205, aneurisma 104** — coinciden exacto.
+
+**Por qué PTB-XL primero y no Challenge 2021:** ya está preprocesada en Fase 2 (no hay que reprocesar ni copiar nada) y es la fuente **más rica del patrón más escaso** — 1.623 HBAI contra los 500 de Challenge 2021 entero, y 284 casos de BRD+HBAI contra 101. Es la prueba barata del mecanismo antes de pagar el costo de la etapa B.
+
+**Decisiones tomadas:**
+- **El BRD de PTB-XL entra a la cabeza de RBBB que ya existe**, no a una nueva: es el mismo hallazgo clínico y le duplica los ejemplos anotados. Pero **solo `CRBBB`, no `IRBBB`** — la columna RBBB de CODE-15% es bloqueo completo, y mezclarle incompletos le cambiaría el significado a una cabeza validada (AUPRC 0,79) y comparable entre corridas. Con CRBBB solo, la coocurrencia BRD+HBAI en PTB-XL baja de 284 a 162, como era de esperar.
+- **Un `pos_weight` por cabeza**, no uno común: en PTB-XL el hemibloqueo es ~7,5% pero el aneurisma ~0,5% (medido: 12,4 / 17,2 / 208,4 sobre el train). Un peso único trataría mal al más raro.
+- **Una `nn.Linear` de n salidas** en vez de n Linear de 1: idéntico matemáticamente y agregar un patrón no cambia la forma del `state_dict` más que en una dimensión. Con `n_patrones=0` el modelo queda byte a byte igual al de todas las corridas previas.
+
+**El flag `--ptbxl-patrones`** mete PTB-XL al train **con `chagas_mask=0`**: alimenta las cabezas de patrón sin aportar un solo gradiente que diga "PTB-XL → negativo de Chagas". Es la mitigación que este documento venía proponiendo desde el 2026-08-26. Train pasa de 238.027 a 253.313 registros.
+
+**El riesgo NO está resuelto y se decide midiendo.** PTB-XL entra al entrenamiento por primera vez desde que se lo excluyó el 2026-08-12, y el motivo sigue vigente: su contenido de alta frecuencia lo separa de CODE-15% con AUC 0,880 aun después del z-score, y como es 100% negativo, reconocer el origen equivale a saber la etiqueta. La máscara corta el gradiente directo, pero **el cuerpo compartido podría codificar el origen igual**. Queda activa la parada temprana por atajo (`--paciencia-atajo 2`): si el diagnóstico cruza a positivo dos épocas seguidas, la corrida se frena sola. **Que se frene sería un resultado, no una falla.**
+
+Corrida lanzada: `patrones-lr8` (30 épocas, config idéntica a `ctrl-lr8` + el flag), más una cola con `patrones-lr8-s123` y `ctrl-lr8-s123`. **Las repeticiones de semilla son deliberadas:** el problema del 2026-08-28 no fue falta de ideas sino no poder distinguir señal de ruido con una sola corrida, y sin una barra de error para la config base cualquier diferencia vuelve a ser ininterpretable. Resultados pendientes.
+
+### 17. Etapa B: Challenge 2021 dentro de `metadata.parquet` — dos trampas encontradas
+
+`build_challenge2021()` suma los 62.845 registros con tier de confianza nuevo, `sin-etiqueta`. Total del corpus: **429.699 registros**.
+
+**Trampa 1 — un NaN suelto habría estratificado los 62.845 como POSITIVOS.** `split_patients` arma el estrato con `groupby(...)["chagas_label"].any()`. Con un NaN de numpy eso da `True`, porque en Python **`bool(nan)` es `True`**: los registros sin serología habrían entrado al estrato de positivos y contaminado el split entero, en silencio y sin que nada fallara. La solución es escribir la columna con el **dtype `boolean` nullable de pandas**, donde `.any()` ignora los nulos por defecto (`skipna=True`). Verificado: da `False`.
+
+**Trampa 2 — `preprocess.py` truncaba el dataset existente al arrancar.** Usaba `h5py.File(FASE2_HDF5, "w")`, que vacía el archivo al instante. Cualquier corte a mitad —consola cerrada, máquina apagada, SSD desconectado, todas cosas que pasaron esta semana— destruía los **45,4 GB** ya procesados y obligaba a rehacer la fase entera. Ahora escribe a `.hdf5.tmp` y renombra al final, mismo patrón que `convert_challenge2021.py`.
+
+**Verificado antes de correr:** `.any()` sobre pacientes sin etiqueta da `False`; **0 pacientes viejos cambiaron de split** (el congelado del hallazgo 9 haciendo su trabajo — sin él, esta misma corrida habría movido 26.617 de test a train); Challenge 2021 repartido 70/15/15.
+
+**Error propio, anotado para no repetirlo:** se corrió `preprocess.py --limit 3000` como "prueba corta" y **`--limit` escribe sobre el mismo archivo de producción**, así que reemplazó los 45,4 GB reales por uno de 2.962 registros. La protección recién agregada era contra cortes a mitad, no contra apuntar el test al archivo bueno. No se perdieron datos de origen (la corrida completa lo repone y la caja conserva su copia), pero **`--limit` no es un modo de prueba seguro: escribe donde escribe la corrida real.**
+
+**Consecuencia operativa:** al regenerar el HDF5 cambian los `row_index`, así que **la copia de la caja queda desactualizada**. El archivo nuevo pesa ~56 GB; mandarlo por red es caro y conviene llevarlo en el SSD. Las corridas en curso allá no se ven afectadas: usan su copia local.
 
 **Nota operativa sobre la caja de entrenamiento:** no responde a `ping` (ICMP bloqueado) — usar `timeout 6 bash -c "echo > /dev/tcp/<ip>/22"` para saber si está viva. Su IP es DHCP; se la ubica escaneando el puerto 22 de la subred y comparando la host key ed25519 `SHA256:DX4eXyjzZfOiDipPFECQPul0DU2/xGK1bT+0DZmttz4`, que es identificación criptográfica y no admite falsos positivos. Y verificar **primero** en qué subred está la laptop: el 2026-08-28 se perdió el acceso simplemente porque la laptop pasó al WiFi "ORT" (`10.4.4.x/22`) mientras la caja seguía en `10.40.5.x`.
 
