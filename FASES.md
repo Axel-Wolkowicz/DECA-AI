@@ -1347,6 +1347,54 @@ Corrida lanzada: `patrones-lr8` (30 épocas, config idéntica a `ctrl-lr8` + el 
 
 **Nota operativa sobre la caja de entrenamiento:** no responde a `ping` (ICMP bloqueado) — usar `timeout 6 bash -c "echo > /dev/tcp/<ip>/22"` para saber si está viva. Su IP es DHCP; se la ubica escaneando el puerto 22 de la subred y comparando la host key ed25519 `SHA256:DX4eXyjzZfOiDipPFECQPul0DU2/xGK1bT+0DZmttz4`, que es identificación criptográfica y no admite falsos positivos. Y verificar **primero** en qué subred está la laptop: el 2026-08-28 se perdió el acceso simplemente porque la laptop pasó al WiFi "ORT" (`10.4.4.x/22`) mientras la caja seguía en `10.40.5.x`.
 
+**El HDF5 de Fase 2 NO se transfiere por WiFi.** Medido el 2026-09-04: el enlace da **~3 MB/s**, o sea 5 horas para los 53 GB, con cortes (`lost connection`) cada pocos minutos que obligan a reanudar. El SSD externo lee a 300 MB/s y no es el cuello. Una medición previa de "100 MB/s" era falsa: se hizo con un archivo de 200 MB que entró en buffer y midió el llenado del buffer, no la transferencia. **La vía correcta es enchufar el SSD directo a la caja**, o cable Ethernet. Si alguna vez hay que mandarlo por red igual, `scp` no sirve porque no reanuda: hay que appendear desde el offset del destino (`dd skip=N | ssh 'cat >>'`), truncando antes a un múltiplo del tamaño de bloque para que el offset caiga exacto.
+
+### 18. RESULTADO del paso 5: las cabezas de patrón NO mejoran la detección de Chagas
+
+Diseño 2×2 —cabezas de patrón (sí/no) × semilla (42/123)— de 30 épocas cada una, config idéntica salvo el flag. **Es el primer experimento de todo el proyecto con réplica de semilla**, que es justo lo que faltaba para separar señal de ruido.
+
+**Media de las últimas 10 épocas** (medida robusta, no el máximo):
+
+| corrida | AUPRC | AUC | TPR@5% |
+|---|---|---|---|
+| patrones s42 | 0,1676 ± 0,0024 | 0,8367 | 41,1% |
+| patrones s123 | 0,1651 ± 0,0032 | 0,8328 | 40,4% |
+| control s42 | 0,1646 ± 0,0037 | 0,8390 | 41,7% |
+| control s123 | 0,1669 ± 0,0027 | 0,8298 | 41,2% |
+
+**El contraste, juntando semillas:**
+
+| métrica | patrones | control | diferencia |
+|---|---|---|---|
+| AUPRC | 0,1663 | 0,1658 | +0,0006 → **0,13 desvíos** |
+| AUC | 0,8348 | 0,8344 | +0,0003 → 0,06 desvíos |
+| TPR@5% | 40,8% | 41,4% | −0,7 pp → 0,74 desvíos |
+
+**Cero.** No es ambiguo como el resultado de demográficos: es exactamente nulo en dos métricas y levemente negativo en la tercera.
+
+**Y el hallazgo que reencuadra toda la Fase 4: ninguna configuración probada difiere de las otras.** Los máximos por corrida (0,1797 · 0,1828 · 0,1735 · 0,1825) rebotan sin patrón, pero las medias de las últimas 10 son 0,1676 · 0,1651 · 0,1646 · 0,1669 — **todas iguales dentro del ruido**. El 0,1755 de `abl-peso1` cae dentro de esa misma banda. Sumado a los nulos ya medidos de `peso_strong`, oversampling, scheduler de LR y demográficos, **la conclusión es que veníamos comparando máximos de series ruidosas y ninguna palanca de hiperparámetros movió nunca la aguja.**
+
+**Dos resultados positivos, igual de importantes:**
+
+1. **El atajo de fuente NO se reabrió.** Media −0,0054 y −0,0067 en las corridas con patrones (control: −0,0130 y −0,0097), con apenas 1 y 2 épocas de 30 marginalmente positivas (máximo +0,0032). Meter PTB-XL al entrenamiento después de excluirlo desde el 2026-08-12 **era el riesgo central de esta línea**, y quedó medido: la máscara de Chagas funciona. Eso habilita usar fuentes sin etiqueta sin contaminar la cabeza principal.
+
+2. **Las cabezas de patrón andan bien y son el entregable real** (media últimas 10):
+
+| cabeza | s42 | s123 |
+|---|---|---|
+| hbai | **0,7957** | 0,7727 |
+| extra | **0,7695** | 0,7152 |
+| rbbb | 0,7813 | 0,7849 |
+| zona | 0,1519 | 0,2566 |
+
+Hemibloqueo y extrasístoles en ~0,77 significan que el modelo **puede justificar la derivación**: "se prioriza porque hay BRD + HBAI". Eso es lo que el ROADMAP promete, lo que un priorizador necesita para que un médico le crea, y lo que hasta ahora no entregábamos. `zona` sigue flojo, consistente con la decisión discutible de mezclar aneurisma ventricular con onda Q anormal.
+
+La cabeza de RBBB también mejoró un poco con las fuentes extra (0,781/0,785 contra 0,776/0,758 del control).
+
+**Conclusión para el proyecto: la fase de modelado está agotada.** Seis palancas medidas, seis nulos, y el techo de ~0,84 confirmado como estado del arte publicado. Lo que queda no es optimización sino producto — las cabezas de patrón se quedan **no por el AUC sino porque son la explicación**, y el trabajo restante es de alcance y validación clínica, no de hiperparámetros.
+
+**Pendiente:** Challenge 2021 entrenado de verdad. Está procesado en la Fase 2 del SSD con `--con-challenge2021` funcionando, pero solo se corrieron 4 épocas sueltas (que apuntaban bien: atajo entre −0,018 y −0,045, AUPRC subiendo 0,1320 → 0,1693 sin amesetarse). Falta llevarlo a la caja por USB y correr 30 épocas contra `patrones-lr8`. Expectativa realista, dado este resultado: nulo sobre Chagas, posible mejora de las cabezas de patrón, y la única forma de cerrar el atajo de fuente por construcción al tener seis orígenes donde "de qué dataset viene" ya no predice la etiqueta.
+
 ---
 
 ## Fase 5 — Validación y evaluación 🔲
