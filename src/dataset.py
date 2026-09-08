@@ -56,6 +56,7 @@ from config import (
     FASE2_HDF5,
     FASE2_METADATA_PATH,
     PTBXL_DATABASE_CSV,
+    SAMITROP_EXAMS_CSV,
 )
 
 # Pesos por tier de confianza de la etiqueta (columna `confianza` de metadata).
@@ -128,6 +129,31 @@ def _patrones_challenge2021() -> pd.DataFrame:
     return out
 
 
+def _normal_ecg() -> pd.DataFrame:
+    """(dataset, record_id, ecg_anormal) desde code15/exams.csv y samitrop/exams.csv.
+
+    Las dos fuentes traen la columna `normal_ecg` y ninguna se estaba leyendo (FASES.md,
+    hallazgo 2 del 2026-08-27: "estas columnas ya estaban en el disco"). PTB-XL no la
+    tiene --usa la taxonomia SCP-- pero da igual: es 100% negativo de Chagas y la
+    redefinicion del target solo toca positivos.
+
+    Se devuelve `ecg_anormal` (= not normal_ecg) y no `normal_ecg` para que la columna sea
+    positiva en el sentido clinico: 1.0 = hay algo raro en el trazado.
+    """
+    trozos = []
+    for dataset, csv in (("code15", CODE15_EXAMS_CSV), ("samitrop", SAMITROP_EXAMS_CSV)):
+        df = pd.read_csv(csv, usecols=["exam_id", "normal_ecg"])
+        # astype("boolean") (nullable) y no bool: si el CSV trajera vacios, bool los
+        # convertiria a True en silencio en vez de dejarlos NaN para que la mascara los vea.
+        anormal = 1.0 - df["normal_ecg"].astype("boolean").astype("Float64")
+        trozos.append(pd.DataFrame({
+            "dataset": dataset,
+            "record_id": df["exam_id"].astype(str),
+            "ecg_anormal": anormal,
+        }))
+    return pd.concat(trozos, ignore_index=True)
+
+
 def _patrones_ptbxl() -> pd.DataFrame:
     """(dataset, record_id, <patron>_label..., brd_ptbxl) desde el vocabulario SCP.
 
@@ -160,6 +186,9 @@ def cargar_metadata_fase4(peso_strong: float | None = None) -> pd.DataFrame:
         chagas_mask  float32, 1.0 si el registro tiene label de Chagas, 0.0 si no
         <patron>_label / <patron>_mask  float32, para cada uno de PATRONES (solo PTB-XL
                      los tiene anotados; en el resto la mascara es 0)
+        ecg_anormal  float32, 1.0 si el trazado esta anotado como anormal (code15 y
+                     samitrop); 0.0 tambien donde no hay dato, lo tapa la mascara
+        ecg_anormal_mask  float32, 1.0 si el registro tiene esa anotacion
         peso         float32, peso de la muestra en la loss de Chagas
     """
     meta = pd.read_parquet(FASE2_METADATA_PATH)
@@ -206,6 +235,13 @@ def cargar_metadata_fase4(peso_strong: float | None = None) -> pd.DataFrame:
     meta = meta.drop(columns=["brd_ptbxl", "brd_c2021"])
     meta["rbbb_label"] = meta["rbbb_label"].astype(np.float32)
     meta["rbbb_mask"] = meta["rbbb_mask"].astype(np.float32)
+
+    # ECG anormal: proxy grueso de cardiopatia, la unica definicion de "cardiopatia
+    # chagasica" que tenemos (ver aplicar_target y FASES.md 2026-08-27, seccion 4). Merge
+    # por (dataset, record_id) por la misma razon que los anteriores.
+    meta = meta.merge(_normal_ecg(), on=["dataset", "record_id"], how="left")
+    meta["ecg_anormal_mask"] = meta["ecg_anormal"].notna().astype(np.float32)
+    meta["ecg_anormal"] = meta["ecg_anormal"].fillna(0.0).astype(np.float32)
 
     pesos = dict(PESOS_CONFIANZA)
     if peso_strong is not None:
@@ -260,13 +296,96 @@ def filtrar_split(
     return sub.reset_index(drop=True)
 
 
+# ---------------------------------------------------------------------------
+# Redefinicion del target: infeccion (serologia) vs cardiopatia
+# ---------------------------------------------------------------------------
+# El ROADMAP dice, desde el titulo, que el objetivo es detectar **cardiopatia chagasica**.
+# `chagas_label` es serologia/autorreporte, o sea **infeccion**. El PLOS NTD 2023 gana
+# +0,14/+0,18 de AUC solo cambiando cual de las dos cosas cuenta como positivo, porque la
+# mayoria de los seropositivos nunca desarrolla compromiso cardiaco y su ECG es
+# genuinamente normal: son positivos inaprendibles.
+#
+# **El proxy es grueso y hay que decirlo.** "ECG anormal" no es cardiopatia chagasica: el
+# 60,4% de los negativos de CODE-15% tambien tiene ECG anormal. Medido el 2026-08-27,
+# restringir los positivos SOLO en la evaluacion (sin reentrenar) compra +0,024 de AUC y no
+# los +0,14 del paper, porque los positivos con ECG normal son apenas el 12,6%. Lo que
+# estas funciones habilitan es la otra mitad del experimento: entrenar con el target
+# redefinido, no solo evaluarlo.
+TARGETS = ("serologia", "cardiopatia-mask", "cardiopatia-neg")
+
+
+def positivo_sin_cardiopatia(meta: pd.DataFrame) -> np.ndarray:
+    """bool por fila: seropositivos cuyo trazado esta anotado como NORMAL.
+
+    Un positivo cuyo `normal_ecg` no esta anotado NO entra aca: "no sabemos" no es "ECG
+    normal". Hoy eso no pasa (code15 y samitrop anotan los suyos, y PTB-XL no tiene
+    positivos), pero la regla vale igual para cualquier fuente que se sume despues.
+    """
+    return (
+        (meta["chagas_label"].to_numpy(dtype=np.float32) > 0)
+        & (meta["chagas_mask"].to_numpy(dtype=np.float32) > 0)
+        & (meta["ecg_anormal_mask"].to_numpy(dtype=np.float32) > 0)
+        & (meta["ecg_anormal"].to_numpy(dtype=np.float32) == 0)
+    )
+
+
+def aplicar_target(meta: pd.DataFrame, target: str) -> pd.DataFrame:
+    """Devuelve una copia con el target redefinido. **Se aplica SOLO al train.**
+
+    Que val quede intacta no es un detalle de implementacion, es lo que hace comparable al
+    experimento: si la vara se moviera junto con el objetivo no habria contra que medir.
+    Toda corrida evalua contra las mismas dos arenas fijas (ver mascara_arena_cardiopatia).
+
+      serologia         no toca nada. Default, y deja las corridas historicas reproducibles.
+      cardiopatia-mask  a los seropositivos de ECG normal les pone chagas_mask=0: no
+                        aportan gradiente a la cabeza de Chagas, ni como positivos ni como
+                        negativos. Es el mecanismo que ya existe para las fuentes sin
+                        etiqueta de Chagas (Challenge 2021), reusado.
+      cardiopatia-neg   los pasa a negativos. Es la definicion literal "positivo =
+                        cardiopatia". **Riesgo especifico de esta variante:** el target
+                        pasa a ser "seropositivo Y trazado anormal", y el modelo puede
+                        satisfacer parte de eso aprendiendo "anormal" a secas, que no es
+                        especifico de Chagas. Se mide, no se razona.
+
+    Los negativos no se tocan en ningun modo: el experimento redefine la clase positiva.
+    """
+    if target not in TARGETS:
+        raise ValueError(f"target desconocido: {target} (opciones: {', '.join(TARGETS)})")
+    if target == "serologia":
+        return meta
+
+    afectados = positivo_sin_cardiopatia(meta)
+    meta = meta.copy()
+    if target == "cardiopatia-mask":
+        meta.loc[afectados, "chagas_mask"] = np.float32(0.0)
+    else:
+        meta.loc[afectados, "chagas_label"] = False
+    return meta
+
+
+def mascara_arena_cardiopatia(meta: pd.DataFrame) -> np.ndarray:
+    """bool por fila: que registros entran a la arena A-cardiopatia.
+
+    Saca los positivos con ECG normal; **los negativos quedan todos**. Es exactamente la
+    restriccion del paso 1 del 2026-08-27, cuyo resultado con `abl-peso1` es el baseline
+    contra el que se compara: AUC 0,8622 / AUPRC 0,18999 sobre arena A.
+
+    Se devuelve una mascara y no un DataFrame filtrado porque los scores vienen alineados
+    con `meta` por posicion (ver ECGDataset) y hay que recortar los dos con el mismo indice.
+    """
+    return ~positivo_sin_cardiopatia(meta)
+
+
 EDAD_TOPE = 90.0   # ver normalizar_demograficos
 EDAD_CENTRO = 50.0
 EDAD_ESCALA = 25.0
+# Valor de "no se" para el sexo. No es 0.0 --que es "mujer"-- sino el punto medio entre
+# las dos categorias: ver el segundo bloque del docstring de normalizar_demograficos.
+SEXO_DESCONOCIDO = 0.5
 
 
 def normalizar_demograficos(meta: pd.DataFrame) -> np.ndarray:
-    """(N, 2) float32 con [edad normalizada, es_hombre]. Sin faltantes en los 3 datasets.
+    """(N, 2) float32 con [edad normalizada, es_hombre]. Nunca devuelve un no-finito.
 
     **El tope de edad no es cosmetico.** PTB-XL codifica "mayor de 89" como `edad=300`
     (convencion de anonimizacion de la fuente): son 293 registros que, sin recortar,
@@ -274,15 +393,49 @@ def normalizar_demograficos(meta: pd.DataFrame) -> np.ndarray:
     los 300, el maximo de PTB-XL es exactamente 89. Se recorta a 90 porque es lo que el
     centinela realmente significa (89+), no un valor inventado.
 
+    **Los faltantes se imputan, y hasta el 2026-09-08 no se imputaban.** El docstring de
+    esta funcion decia "sin faltantes en los 3 datasets", y era cierto con 3 datasets:
+    Challenge 2021, que entro a fase2_metadata el 2026-09-02, trae **124 edades y 21 sexos
+    nulos**. Las tres consecuencias, en orden de gravedad:
+
+      1. `--con-demograficos --con-challenge2021` metia 80 filas con NaN al train. Un solo
+         NaN vuelve NaN la perdida, despues los gradientes y despues todos los pesos, y de
+         ahi no se vuelve. Esa combinacion de flags nunca se corrio, por eso no exploto.
+         `verify_preprocessed.py` no lo hubiera atrapado: revisa la señal, no esta tabla.
+      2. Corrompia la evaluacion: 24 filas de val, que es como se encontro esto (los logits
+         no finitos de `demo-v1` en src/ensemble.py).
+      3. La mas silenciosa: `sexo == "M"` mandaba los 21 nulos a 0.0, o sea los registraba
+         como mujeres. No rompia nada -- devolvia un numero plausible, que es peor.
+
+    Se imputa edad -> EDAD_CENTRO, que normalizado da exactamente 0.0. Como la escala es
+    fija, 0.0 es literalmente "sin informacion" y no un valor inventado. El sexo va a
+    SEXO_DESCONOCIDO=0.5 por la misma razon: es el unico valor que no afirma nada.
+
+    Los numeros historicos de `demo-v1` (2026-08-27) NO estan afectados: son anteriores a
+    que Challenge 2021 entrara al corpus, asi que su val no tenia ninguna de estas filas.
+
     La escala es fija y no depende de los datos (centro 50, escala 25, ~la media y 1,3
     desvios de CODE-15%) para que train/val/test y cualquier corrida futura vean la misma
     transformacion -- normalizar con estadisticos del split traeria fuga.
     """
-    edad = meta["edad"].to_numpy(dtype=np.float32)
+    edad = pd.to_numeric(meta["edad"], errors="coerce").to_numpy(dtype=np.float32)
+    edad = np.where(np.isfinite(edad), edad, EDAD_CENTRO)
     edad = np.clip(edad, 0.0, EDAD_TOPE)
     edad = (edad - EDAD_CENTRO) / EDAD_ESCALA
-    es_hombre = (meta["sexo"].to_numpy() == "M").astype(np.float32)
-    return np.stack([edad, es_hombre], axis=1).astype(np.float32)
+
+    sexo = meta["sexo"].to_numpy()
+    conocido = pd.notna(sexo)
+    es_hombre = np.where(conocido, sexo == "M", SEXO_DESCONOCIDO).astype(np.float32)
+
+    demo = np.stack([edad, es_hombre], axis=1).astype(np.float32)
+    if not np.isfinite(demo).all():
+        # Defensa en profundidad: si aparece una fuente nueva con otra forma de codificar
+        # un faltante, que reviente aca y no en la epoca 3 con los pesos ya en NaN.
+        raise ValueError(
+            f"{int((~np.isfinite(demo)).any(axis=1).sum())} filas con demograficos no "
+            "finitos despues de imputar. Revisar las columnas edad/sexo de la fuente nueva."
+        )
+    return demo
 
 
 class ECGDataset(Dataset):
@@ -407,3 +560,16 @@ if __name__ == "__main__":
     train = filtrar_split(meta, "train")
     print(f"\npos_weight chagas (train, sin ptbxl) = {pos_weight_chagas(train):.1f}")
     print(f"pos_weight rbbb   (train, sin ptbxl) = {pos_weight_rbbb(train):.1f}")
+
+    print("\nCobertura de normal_ecg y efecto de redefinir el target:")
+    sin_dato = int(((meta["chagas_label"] > 0) & (meta["ecg_anormal_mask"] == 0)).sum())
+    print(f"  positivos sin anotacion de normal_ecg (quedan intactos): {sin_dato}")
+    for split in ("train", "val"):
+        sub = filtrar_split(meta, split)
+        pos = int((sub["chagas_label"].to_numpy(dtype=np.float32) > 0).sum())
+        afect = int(positivo_sin_cardiopatia(sub).sum())
+        pct = afect / pos * 100 if pos else float("nan")
+        print(f"  {split:<6} {pos:>6} positivos, {afect:>5} con ECG normal ({pct:.1f}%)")
+    for target in TARGETS:
+        t = aplicar_target(train, target)
+        print(f"  target {target:<17} pos_weight chagas = {pos_weight_chagas(t):.1f}")

@@ -1397,6 +1397,132 @@ La cabeza de RBBB también mejoró un poco con las fuentes extra (0,781/0,785 co
 
 ---
 
+## Sesión del 2026-09-08 — el ensemble no sube el techo, y un bug de NaN que iba a matar una corrida
+
+Disparada por dos preguntas de Axel: *"¿podemos hacerle boosting al modelo?"* y *"¿sirven
+modelos de árboles tipo XGBoost?"*. Las dos se contestaron con argumento, no con corridas
+(ver más abajo), y de ahí salió ejecutar el ensemble, que era el pendiente nº 1 desde el
+2026-08-26 y nunca se había hecho.
+
+### 1. Boosting y XGBoost: por qué no, argumentado
+
+**Boosting está contraindicado acá, no es solo que no ayude.** Su mecanismo es subirle el
+peso a lo que el modelo falla, y eso supone que lo fallado es aprendible. El hallazgo
+central del 2026-08-26 dice lo contrario: los positivos que el modelo falla son en su
+mayoría seropositivos con ECG genuinamente normal. Boosting los detectaría como "los más
+difíciles" y dedicaría los modelos siguientes a memorizar ruido de etiqueta. El mismo
+argumento descarta focal loss y hard-example mining, que son la misma idea con otro nombre.
+
+**XGBoost sobre la señal cruda no aplica**: 33.600 features (2800×12) sin invarianza a
+traslación, y un árbol parte por "muestra 1.437 > 0,3" — un latido corrido 40 ms rompe
+todos los splits. Su único lugar posible es como *stacker* de salidas (logits de las 5
+cabezas + demográficos + clínicas de SaMi-Trop), y ahí ya sabemos que dos de esos
+ingredientes son nulos: §13b midió que edad y sexo no sirven, y §14 que el score de Chagas
+*ya es* en gran medida la señal de BRD, así que las cabezas de patrón aportan poco nuevo.
+Queda como opción abierta, de baja prioridad, y exigiría partir val en dos por paciente
+para no ajustar el meta-modelo en la misma arena donde se lo reporta.
+
+### 2. Ensemble de 6 checkpoints: RESULTADO NULO sobre el mejor individual
+
+`src/ensemble.py` (nuevo). No reentrena: una sola pasada sobre val con los 6 modelos a la
+vez (leer el HDF5 por USB es lo caro, no la GPU) y promedio de scores. Deduce la
+arquitectura de cada checkpoint de su `state_dict` y no de su `args.json`, porque no son
+todos iguales (`demo-v1` lleva n_demograficos=2, `patrones-lr8` n_patrones=3).
+
+**Control:** `abl-peso1` da AUC 0,8378 / AUPRC 0,17550, idéntico a lo documentado.
+
+| modelo | AUC A-ser | AUPRC A-ser | TPR@5% | AUC A-card | AUPRC A-card |
+|---|---|---|---|---|---|
+| abl-peso1 | 0,8378 | 0,1755 | 41,4% | 0,8625 | 0,1922 |
+| abl-peso1-seed123 | 0,8395 | 0,1654 | 41,4% | 0,8712 | 0,1820 |
+| patrones-lr8 | 0,8314 | **0,1798** | 39,9% | 0,8616 | 0,1975 |
+| real8ep | 0,8397 | 0,1501 | 38,9% | 0,8654 | 0,1626 |
+| demo-v1 | **0,8475** | 0,1519 | **42,0%** | 0,8718 | 0,1642 |
+| abl-peso5 | 0,8310 | 0,1461 | 39,2% | 0,8621 | 0,1594 |
+| **ENSEMBLE-prob** | 0,8467 | 0,1796 | 41,3% | 0,8740 | **0,1976** |
+| ENSEMBLE-logit | 0,8458 | 0,1756 | 40,7% | **0,8743** | 0,1930 |
+| ENSEMBLE-rank | 0,8467 | 0,1791 | 41,4% | 0,8743 | 0,1969 |
+
+**El ensemble empata o pierde por poco contra el mejor individual en las tres métricas.**
+Pero esa comparación está sesgada a favor del individual: "el mejor de 6" se elige después
+de mirar validación. El ensemble no elige nada y llega al mismo lugar. El resultado honesto
+es que **no sube el techo, elimina la necesidad de acertarle al checkpoint** — que es útil
+para congelar un modelo en Fase 5, pero no es la ganancia que se esperaba del pendiente nº1.
+
+Tres cosas más, todas cerradas:
+- **Las tres escalas de promedio dan lo mismo** (0,8467 / 0,8458 / 0,8467). Decisión muerta.
+- **Había diversidad y no alcanzó.** Spearman medio 0,866, con pares en 0,827 — no son
+  modelos clonados. Promediar modelos que se equivocan en lugares distintos igual no compró
+  nada: es otra evidencia a favor del techo de etiqueta y en contra de un problema de varianza.
+- **La brecha serología→cardiopatía se reproduce exacto**: `abl-peso1` pasa de 0,8378 a
+  0,8625, **+0,0247** contra el +0,024 medido el 2026-08-27, con un pipeline independiente.
+
+Espejismo a no comprar: `demo-v1` tiene el mejor AUC y el mejor TPR@5% de la tabla, lo que
+parece contradecir el veredicto de §13b. No lo contradice — es un máximo de una serie
+ruidosa, el error exacto que identificó §18. Resultados en `modelos/ensemble_val_20260908.json`.
+
+### 3. BUG: demográficos NaN de Challenge 2021 — habría matado una corrida
+
+Encontrado porque `demo-v1` daba 24 logits no finitos y rompía el ensemble.
+
+| dataset | edad nula | sexo nulo |
+|---|---|---|
+| **challenge2021** | **124** | **21** |
+| code15 / ptbxl / samitrop | 0 | 0 |
+
+`normalizar_demograficos` decía en su docstring "sin faltantes en los 3 datasets". Era
+cierto con 3; dejó de serlo el 2026-09-02, cuando entró el cuarto. Tres consecuencias:
+
+1. **`--con-demograficos --con-challenge2021` metía 80 filas con NaN al train.** Un solo
+   NaN vuelve NaN la pérdida, después los gradientes y después todos los pesos. Esa
+   combinación de flags nunca se corrió, por eso no explotó. `verify_preprocessed.py` **no**
+   lo hubiera atrapado: revisa la señal, no esta tabla.
+2. Corrompía la evaluación (24 filas de val).
+3. La más silenciosa: `sexo == "M"` mandaba los 21 nulos a 0,0, o sea **los registraba como
+   mujeres**. No rompía nada: devolvía un número plausible.
+
+**Arreglado:** edad faltante → `EDAD_CENTRO` (normalizado da exactamente 0,0, que con
+escala fija es literalmente "sin información"), sexo faltante → `SEXO_DESCONOCIDO = 0.5`, y
+la función ahora revienta si queda un no-finito, en vez de dejarlo pasar a la red.
+Verificado: 0 no finitos en val y en el train con Challenge 2021. **Los números históricos
+de `demo-v1` no están afectados** — son del 2026-08-27, anteriores a que Challenge 2021
+entrara al corpus.
+
+Nota lateral medida en el camino: el AMP **no** era la causa (fp32 daba los mismos 24
+NaN), pero `src/ensemble.py` igual quedó con AMP apagado por default. Evaluando, un fp16
+que desborda no lo atrapa ningún GradScaler y no da error: da un score corrupto y un número
+plausible. La diferencia de logit contra AMP es 0,0037 y la pasada pasa de ~2 a ~4 min.
+
+### 4. `normal_ecg` incorporada a Fase 4, y el target redefinido implementado a medias
+
+`code15/exams.csv` y `samitrop/exams.csv` traen los dos la columna y **ninguna se leía en
+Fase 4**. Ahora `cargar_metadata_fase4` la trae como `ecg_anormal` + `ecg_anormal_mask`
+(merge por `(dataset, record_id)`, como todos los demás). Cobertura: **0 positivos sin
+anotación**. De los 5.657 positivos de train, **934 (16,5%) tienen ECG normal**.
+
+Se agregaron a `dataset.py`:
+- `TARGETS` y `aplicar_target(meta, target)` — `serologia` (default, no toca nada),
+  `cardiopatia-mask` (chagas_mask=0 a los positivos de ECG normal) y `cardiopatia-neg` (los
+  pasa a negativos). **Se aplica solo al train.** `pos_weight` pasa de 41,1 a 49,2/49,4.
+- `mascara_arena_cardiopatia(meta)` — la arena de evaluación restringida.
+
+**La decisión metodológica que sostiene el experimento: la evaluación no se mueve con el
+target.** Val conserva siempre la etiqueta serológica y toda corrida reporta las mismas dos
+arenas fijas (A-serología y A-cardiopatía). Si la vara cambiara junto con el objetivo, no
+habría contra qué medir.
+
+### Qué quedó pendiente al cortar la sesión
+
+1. **`--target` en `train.py`**: falta el flag, la doble evaluación por época
+   (`arenas_cardiopatia` al lado de `arenas`, sin tocar la clave histórica) y que la
+   selección del mejor checkpoint siga al target.
+2. **Las dos corridas de 8 épocas** (control + `cardiopatia-mask`, ~1,2 h), acordadas como
+   sondeo antes de comprometer 30 épocas. No sirven para concluir, sí para decidir.
+3. La autodetección de `config.py` **no encontró `D:\DECA-datasets`** en esta sesión y hubo
+   que pasar `DECA_DATA_DIR` a mano. Sin diagnosticar.
+
+---
+
 ## Fase 5 — Validación y evaluación 🔲
 
 **Tareas:**
