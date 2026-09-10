@@ -59,9 +59,12 @@ from tqdm import tqdm
 from config import MODELOS_DIR
 from dataset import (
     PATRONES,
+    TARGETS,
     ECGDataset,
+    aplicar_target,
     cargar_metadata_fase4,
     filtrar_split,
+    mascara_arena_cardiopatia,
     pos_weight_chagas,
     pos_weight_rbbb,
 )
@@ -75,6 +78,9 @@ def construir_loaders(args):
                                limite=args.limit_train,
                                ptbxl_patrones=args.ptbxl_patrones,
                                con_challenge2021=args.con_challenge2021)
+    # SOLO al train: val conserva siempre la etiqueta serologica original, que es lo que
+    # hace comparables entre si a corridas con distinto target. Ver aplicar_target.
+    meta_train = aplicar_target(meta_train, args.target)
     meta_val = filtrar_split(meta, "val", limite=args.limit_val)
 
     ds_train = ECGDataset(meta_train)
@@ -226,6 +232,11 @@ def main():
     p.add_argument("--con-demograficos", action="store_true",
                    help="suma edad y sexo como entrada del modelo (default: apagado, "
                         "arquitectura identica a las corridas previas)")
+    p.add_argument("--target", choices=list(TARGETS), default="serologia",
+                   help="que cuenta como positivo. 'serologia' = infeccion (default, deja "
+                        "la corrida identica a las historicas); las variantes 'cardiopatia-*' "
+                        "sacan del train a los seropositivos con ECG normal. Solo afecta al "
+                        "train: la evaluacion no se mueve. Ver dataset.aplicar_target")
     p.add_argument("--peso-strong", type=float, default=None,
                    help="peso de los registros de etiqueta serologica (default: 1.0, ver dataset.py)")
     p.add_argument("--limit-train", type=int, default=None, help="muestra aleatoria de N registros")
@@ -265,6 +276,17 @@ def main():
           f"({', '.join(f'{d}={n}' for d, n in meta_train['dataset'].value_counts().items())})")
     print(f"val   {len(meta_val):>7} registros  "
           f"({', '.join(f'{d}={n}' for d, n in meta_val['dataset'].value_counts().items())})")
+
+    # Las DOS arenas se calculan en toda corrida, sea cual sea el target, y son siempre las
+    # mismas filas de val: es lo unico que hace comparable una corrida contra otra. Se
+    # precalcula la mascara aca porque no cambia entre epocas.
+    mask_card = mascara_arena_cardiopatia(meta_val)
+    meta_val_card = meta_val[mask_card].reset_index(drop=True)
+    print(f"target: {args.target}  (positivos de train afectados: "
+          f"{int((meta_train['chagas_label'].to_numpy(dtype=np.float32) > 0).sum())} quedan "
+          f"de {len(meta_train)} registros)")
+    print(f"arena A-cardiopatia: {int((~mask_card).sum())} registros menos que A-serologia "
+          f"(positivos con ECG normal; los negativos quedan todos)")
 
     modelo = ResNet1D(
         dropout=args.dropout,
@@ -314,7 +336,9 @@ def main():
         if "planificador" in ckpt:
             planificador.load_state_dict(ckpt["planificador"])
         epoca_inicio = ckpt.get("epoca", 0) + 1
-        mejor_auprc = ckpt.get("auprc_arena_A", -1.0)
+        # auprc_seleccion no existe en los checkpoints anteriores al 2026-09-09; en esos la
+        # seleccion era siempre por arena A serologica, asi que el fallback es exacto.
+        mejor_auprc = ckpt.get("auprc_seleccion", ckpt.get("auprc_arena_A", -1.0))
         print(f"Retomando desde {args.resume}: epoca {ckpt.get('epoca')}, "
               f"AUPRC arena A {mejor_auprc:.4f} -> sigue desde epoca {epoca_inicio}")
 
@@ -338,6 +362,7 @@ def main():
         )
 
         res = evaluar_arenas(meta_val, s_chagas)
+        res_card = evaluar_arenas(meta_val_card, s_chagas[mask_card])
         ap_rbbb = auprc_rbbb(s_rbbb, y_rbbb, mask_rbbb)
         dur = time.time() - t0
 
@@ -350,32 +375,51 @@ def main():
               + (f"  patrones {l_patrones:.4f}" if ap_patrones else "")
               + f"   ({dur/60:.1f} min)")
         print(formatear(res))
+        a_card = res_card.get("arena_A", {})
+        print(f"  A-cardiopatia  AUC {a_card.get('auc', float('nan')):.4f}  "
+              f"AUPRC {a_card.get('auprc', float('nan')):.4f}  "
+              f"tpr@5% {a_card.get('capacidad', {}).get('tpr@5%', float('nan'))*100:.1f}%"
+              + ("   <- selecciona el checkpoint" if args.target != "serologia" else ""))
         print(f"  cabeza RBBB: AUPRC {ap_rbbb:.4f}  (se reporta aparte, nunca sumada a la de Chagas)")
         if ap_patrones:
             print("  cabezas de patron: "
                   + "  ".join(f"{k} {v_:.4f}" for k, v_ in ap_patrones.items()))
 
         ap_arena_a = res.get("arena_A", {}).get("auprc", float("nan"))
+        ap_card = a_card.get("auprc", float("nan"))
+        # La seleccion sigue al target: optimizar una cosa y guardar el checkpoint por otra
+        # deja como "mejor" a una epoca que no es la mejor para lo que se entreno.
+        ap_seleccion = ap_arena_a if args.target == "serologia" else ap_card
         historia.append({
             "epoca": epoca, "loss_chagas": l_chagas, "loss_rbbb": l_rbbb,
             "auprc_rbbb": ap_rbbb, "loss_patrones": l_patrones,
             "auprc_patrones": ap_patrones, "segundos": dur, "arenas": res,
+            # Clave nueva, al lado de "arenas" y sin tocarla: todo analisis historico que
+            # lea "arenas" sigue leyendo exactamente lo mismo que antes.
+            "arenas_cardiopatia": res_card, "target": args.target,
         })
         (dir_corrida / "historia.json").write_text(json.dumps(historia, indent=2), encoding="utf-8")
 
         es_nuevo_mejor = False
-        if np.isfinite(ap_arena_a):
-            planificador.step(ap_arena_a)
-            es_nuevo_mejor = ap_arena_a > mejor_auprc
+        if np.isfinite(ap_seleccion):
+            planificador.step(ap_seleccion)
+            es_nuevo_mejor = ap_seleccion > mejor_auprc
             if es_nuevo_mejor:
-                mejor_auprc = ap_arena_a
+                mejor_auprc = ap_seleccion
                 torch.save(
                     {"modelo": modelo.state_dict(), "optimizador": optimizador.state_dict(),
                      "planificador": planificador.state_dict(), "epoca": epoca,
-                     "auprc_arena_A": ap_arena_a, "umbrales": res.get("umbrales"), "args": vars(args)},
+                     # auprc_arena_A sigue significando lo de siempre (arena A serologica),
+                     # asi que un checkpoint viejo y uno nuevo se comparan igual. La metrica
+                     # con la que se ELIGIO va aparte, porque puede ser otra.
+                     "auprc_arena_A": ap_arena_a, "auprc_cardiopatia": ap_card,
+                     "auprc_seleccion": ap_seleccion, "target": args.target,
+                     "umbrales": res.get("umbrales"),
+                     "umbrales_cardiopatia": res_card.get("umbrales"), "args": vars(args)},
                     dir_corrida / "mejor.pt",
                 )
-                print(f"  -> nuevo mejor checkpoint (AUPRC arena A {ap_arena_a:.4f})")
+                arena = "A-serologia" if args.target == "serologia" else "A-cardiopatia"
+                print(f"  -> nuevo mejor checkpoint (AUPRC {arena} {ap_seleccion:.4f})")
 
         # Parada temprana: el mismo criterio que se aplico a mano el 2026-08-13 al cortar
         # la primera corrida real en la epoca 6 (ver docstring del modulo). Se mira
@@ -398,7 +442,8 @@ def main():
          "planificador": planificador.state_dict(), "epoca": epoca, "args": vars(args)},
         dir_corrida / "ultimo.pt",
     )
-    print(f"\nListo. Mejor AUPRC de arena A: {mejor_auprc:.4f}. Artefactos en {dir_corrida}")
+    arena = "A-serologia" if args.target == "serologia" else "A-cardiopatia"
+    print(f"\nListo. Mejor AUPRC de {arena}: {mejor_auprc:.4f}. Artefactos en {dir_corrida}")
 
 
 if __name__ == "__main__":

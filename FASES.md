@@ -1523,6 +1523,235 @@ habría contra qué medir.
 
 ---
 
+## Sesión del 2026-09-10 — dos formas de "limpiar los datos", las dos negativas, y los datasets que faltaban
+
+Sesión disparada por dos propuestas de Axel: *"usemos menos datos, quedémonos con todos los
+de Chagas y de los demás elijamos los más difíciles"* y *"los positivos son casi todos ECG
+normales, no me sirven de NADA"*. Las dos se midieron. Las dos dan negativo. Y de paso se
+cerró el resultado que había quedado colgado de la sesión anterior.
+
+### 1. RESULTADO pendiente de la sesión del 2026-09-08: `card-mask-8ep`
+
+La corrida existía en disco desde el 2026-09-09 pero **su resultado nunca se anotó** — el
+punto 2 de "qué quedó pendiente" seguía abierto. Se cierra acá. `--target cardiopatia-mask`,
+8 épocas pedidas, **cortó en 7**. Control = `abl-peso1` (misma config, 8 épocas, serología).
+
+| | `abl-peso1` (control) | `card-mask-8ep` |
+|---|---|---|
+| AUPRC arena A-serología | **0,1755** | 0,1734 (ép. 7) |
+| TPR@5% arena A-serología | **41,4%** | 40,4% |
+| AUPRC arena A-cardiopatía | **0,18999** | 0,1925 (ép. 7) |
+| TPR@5% arena A-cardiopatía | — | 47,0% |
+
+**Nulo en las dos arenas.** Sacar del entrenamiento a los 934 seropositivos con ECG normal
+no mueve nada: −0,0021 en la arena que decide, +0,0025 en la arena amable. Las dos
+diferencias son un orden de magnitud menores que la oscilación entre épocas (±0,018).
+
+Esto **completa** el experimento que el 2026-08-27 se había hecho solo en evaluación (+0,024
+de AUC restringiendo los positivos sin reentrenar). Ahora está medida también la mitad de
+entrenamiento, y el resultado es que no aporta. La hipótesis de los "positivos inaprendibles
+que ensucian el gradiente" queda cerrada: son inaprendibles, sí, pero sacarlos no libera
+capacidad para nada.
+
+### 2. `hardneg-v1`: hard negative mining — NEGATIVO, y la firma dice exactamente por qué
+
+La idea nunca se había probado: las seis ablaciones previas fueron de *reponderación*
+(`pos_weight`, sampler balanceado, `peso_strong`), ninguna de *selección*. Acá se concentra
+el train en la frontera de decisión.
+
+**Diseño.** Se puntuaron los 232.370 negativos del train con `abl-peso1/mejor.pt` (2 min de
+GPU en la laptop) y se armó un train nuevo:
+
+| | baseline | `hardneg-v1` |
+|---|---|---|
+| positivos | 5.657 | **5.657** (todos, intactos) |
+| negativos | 232.370 | 50.657 |
+| total | 238.027 | 56.314 |
+| desbalance | 41:1 | 9:1 |
+| `pos_weight` | 41,1 | 9,0 |
+
+Los negativos conservados: **34.856 duros** (top 15% por score, arrancan en 0,4943 — más alto
+que el de muchos positivos reales) + **15.801 aleatorios** del resto (8%), estos últimos para
+no perder calibración en los negativos fáciles, que en despliegue son el 98% de la población.
+Config por lo demás idéntica a `abl-peso1` (8 épocas, batch 128, lr 1e-3, `peso_strong` 1,0,
+seed 42). Validación **sin tocar**: mismos 64.247 registros, mismas arenas.
+
+| época | AUC A | AUPRC A | TPR@5% | cabeza RBBB | atajo |
+|---|---|---|---|---|---|
+| 1 | 0,6990 | 0,0887 | 30,5% | 0,7959 | −0,0087 |
+| 2 | 0,6543 | 0,0569 | 21,3% | 0,8031 | −0,0594 |
+| 3 | 0,7410 | 0,1348 | 33,3% | 0,8109 | −0,0239 |
+| 4 | 0,7104 | 0,1246 | 31,7% | 0,8116 | −0,0010 |
+| 5 | 0,7657 | 0,1151 | 31,1% | 0,8177 | −0,0242 |
+| 6 | 0,7312 | 0,1299 | 34,4% | 0,8013 | −0,0222 |
+| **7** | 0,7902 | **0,1510** | **35,3%** | 0,8153 | −0,0310 |
+| 8 | 0,7498 | 0,1479 | 32,9% | 0,8067 | −0,0189 |
+| **`abl-peso1`** | **0,8378** | **0,1755** | **41,4%** | ~0,79 | −0,0021 |
+
+**No es un nulo, es peor**: −0,0245 de AUPRC y −6,1 puntos de TPR@5%, las dos por fuera de la
+banda de ruido. Y el AUC cae 0,048, que es enorme para este proyecto.
+
+**La firma que explica el mecanismo, y que era la predicción hecha antes de correrlo:** la
+cabeza de RBBB **sube** (0,796 → 0,8177, por encima del ~0,79 histórico) mientras la de
+Chagas **baja**. O sea que el modelo no se rompió — aprendió exactamente lo que se le pidió:
+a *despegar* el score de Chagas de la señal de BRD. Y esa señal era el 79% de lo que lo hacía
+funcionar (hallazgo 14 del 2026-08-27: la cabeza de RBBB sola da AUC 0,7937 de los 0,8378).
+
+**Por qué era predecible y por qué igual valía medirlo.** Los negativos difíciles son, por
+construcción, los **seronegativos que tienen los patrones de Chagas** (P(Chagas | BRD) =
+13,79%). Entrenar enriquecido en ellos es pedirle al modelo que distinga BRD chagásico de BRD
+isquémico a partir del trazado. El resultado dice que **esa distinción no está en la señal**:
+el modelo no encontró un rasgo que separe las dos cosas, así que lo único que pudo hacer para
+bajar la loss fue confiar menos en el patrón. Es un resultado sobre los *datos*, no sobre el
+método — y por eso valía la corrida de 15 minutos.
+
+**El código de este experimento se borró.** Ver sección 6.
+
+### 3. La calidad de la etiqueta tampoco es el cuello de botella (evidencia sugestiva)
+
+Buscando de dónde podía venir una mejora, se miró el contraste que estaba a la vista y nunca
+se había leído en esta clave, sobre `abl-peso1` época 4:
+
+| arena | positivos | AUC |
+|---|---|---|
+| A | 666 **autorreportados** (encuesta de CODE-15%) | 0,8378 |
+| D | 230 **confirmados por serología** (SaMi-Trop) | 0,8310 |
+
+Si el techo viniera del ruido de la etiqueta débil, la arena con positivos serológicos
+tendría que ir claramente mejor. Va igual, o marginalmente peor.
+
+**Salvedad, y es grande: no es una comparación limpia.** Arena D difiere de arena A en mucho
+más que la calidad de la etiqueta — otros positivos (SaMi-Trop es una cohorte de cardiopatía
+chagásica crónica, más vieja y más enferma), otros negativos, y es cruzada entre fuentes
+(tiene una oportunidad de atajo que arena A no tiene por construcción). Así que esto es
+**sugestivo, no probatorio**. Lo que sí permite afirmar es que no hay ninguna señal de que
+etiquetas más limpias por sí solas rompan el techo, que es lo que haría falta para justificar
+gastar en conseguirlas.
+
+Leído junto con el paso 1 del 2026-08-27 (quitar el ruido medible compra +0,024) y con el
+punto 1 de esta sesión, **el eje "mejor etiqueta" está agotado en su versión barata**. Lo que
+queda vivo es el otro eje: no una etiqueta más *limpia* de lo mismo, sino una etiqueta de
+**otra cosa** — cardiopatía diagnosticada por eco, no serología. Ver sección 5.
+
+### 4. Corrección de una premisa que casi guía una decisión
+
+Se propuso descartar los positivos con ECG normal partiendo de que *"son casi todos"*. **No
+lo son**, y el número estaba en el disco:
+
+| | ECG anormal |
+|---|---|
+| positivos de Chagas (train) | **83,5%** (4.723 de 5.657) |
+| positivos de Chagas (val) | 83,3% |
+| **negativos de CODE-15%** | **60,2%** (139.805 de 232.370) |
+
+El problema no es que los ECG de Chagas sean normales — el 83,5% está anotado como anormal.
+Es que **son anormales de una forma que se parece a la del 60% de los negativos**. Por eso
+"ECG anormal" como señal sola da AUC 0,6209 y por eso el proxy de cardiopatía es tan grueso.
+
+Queda anotado porque la intuición es natural y va a volver: la respuesta es que limpiar los
+bordes del conjunto no sirve cuando la señal es tenue en todo el conjunto.
+
+### 5. Datasets con evaluación cardiológica — qué existe y qué se puede conseguir
+
+Búsqueda motivada por la única salida que quedó viva: cambiar **qué cuenta como positivo**,
+con una etiqueta de cardiopatía de verdad (el PLOS NTD ganó +0,14/+0,18 de AUC haciendo eso;
+nuestro proxy `normal_ecg` compró +0,024 porque es mucho más grueso).
+
+**a) SaMi-Trop AI-ECG / LVSD — YA DESCARGADO, sin trámite.**
+`https://github.com/samitrop/AI-ECG-Chagas` (6 partes RAR, 141 MB; extraído en
+`D:/DECA-datasets/samitrop-lvsd/`). Del paper de Ribeiro et al. 2021 sobre la cohorte
+SaMi-Trop (AUC 0,839 para LVSD desde el ECG; 0,874 sumando NT-proBNP y sexo — **el mismo
+techo de ~0,84 otra vez**, en una tarea distinta).
+
+- **1.304 pacientes**, todos seropositivos confirmados.
+- **`V2` = fracción de eyección por ecocardiograma** (Simpson): mediana 63%, rango 10–84.
+  **LVEF ≤ 40 (LVSD): 93 (7,1%)**. LVEF < 50: 186 (14,3%).
+- **Los 3 patrones del ROADMAP anotados por cardiólogo**, sobre chagásicos reales: `V21`
+  BRD+HBAI, `V24` extrasístoles ventriculares (33 / 2,5%), `V18` onda Q mayor (156 / 12,0%).
+  También `V20` BRD solo (404 / 31,0%), `V17` QRS≥120, `V19` ST-T, `V23` BRI, `V26` FA,
+  `V25` marcapasos.
+- Comorbilidades para separar daño chagásico de otras causas: HTA 64,4%, diabetes 11,0%,
+  enfermedad renal 10,2%, IAM previo 5,1%, benznidazol 6,3%.
+- **Trae sus propias señales** (`..._data_trace.csv`, 649 MB descomprimido).
+
+**Tres advertencias antes de usarlo:**
+1. **No tiene ni un negativo.** Responde "¿este chagásico tiene el corazón dañado?", no
+   "¿esta persona tiene Chagas?". No reemplaza arena A ni el objetivo del ROADMAP.
+2. **Su `ID_exam` NO cruza con nuestro `exam_id` de SaMi-Trop** (9 dígitos contra 6, espacios
+   de ID distintos). No se puede pegar el LVEF a los 1.545 registros que ya tenemos
+   preprocesados; hay que usar sus señales, o encontrar el mapeo.
+3. **`V21` (BRD+HBAI) da 0,7% (9 casos) y eso no cierra** — la literatura da 10-15% en esta
+   cohorte. Sospecha: `V20` y `V21` son categorías excluyentes. **Verificar antes de usar esa
+   columna**, es justo el patrón nº1 del ROADMAP.
+
+**b) REDS-II Chagas (BioLINCC / NHLBI) — el label exacto que falta, con una duda que lo puede
+matar.** `https://biolincc.nhlbi.nih.gov/studies/chagas/`
+
+- **499 seropositivos + 488 seronegativos apareados** — tiene las dos clases.
+- Ecocardiograma completo (FE, dimensiones, motilidad parietal), NYHA, ~11 años de
+  seguimiento.
+- **Un panel de 3 cardiólogos brasileños adjudicó cada caso como cardiopatía chagásica vs NO
+  chagásica.** Esa es exactamente la distinción que el modelo no puede hacer hoy y que ningún
+  dataset nuestro contiene.
+- Pedido por formulario, registro gratuito.
+- **DUDA CRÍTICA SIN RESOLVER:** la descripción dice "12-lead resting ECGs **classified by
+  Minnesota code criteria**", lo que sugiere que guardaron los hallazgos codificados y **no la
+  señal cruda**. Sin señal no sirve para nada nuestro. Está en el Data Dictionary PDF, que se
+  baja sin registrarse. **Es lo primero a chequear** — la mecha del pedido es de semanas o
+  meses, y no conviene ni arrancarlo ni descartarlo a ciegas.
+
+**c) Moody Challenge 2025 — nada nuevo.** Lo público es exactamente lo que ya tenemos
+(CODE-15%, SaMi-Trop, PTB-XL). REDS-II y SaMi-Trop-3 están secuestrados como conjunto de test
+y no se liberan.
+
+### 6. El código de hard negative mining se borró a propósito
+
+`src/hard_neg_mining.py`, `dataset.seleccionar_hard_negativos` y los flags
+`--hard-neg-scores/--hard-neg-top/--hard-neg-extra` de `train.py` **se eliminaron** tras
+medir el resultado. Decisión de Axel, y es la correcta: un mecanismo que empeora la métrica
+operativa en 6 puntos no debe quedar disponible detrás de un flag donde alguien lo pueda
+prender por error, y `train.py` ya carga suficientes perillas medidas como nulas.
+
+**Lo que queda es este registro.** Si se quisiera repetir, todo lo necesario está en la
+sección 2: puntuar los negativos del train con un checkpoint (sigmoid del logit de Chagas,
+`shuffle=False`, alineado por posición), quedarse con todos los positivos + top 15% de
+negativos por score + 8% aleatorio del resto, `pos_weight` se recalcula solo. **Pero antes de
+repetirlo hay que tener una hipótesis nueva de por qué esta vez sería distinto** — la de esta
+vez está refutada y la firma (RBBB sube, Chagas baja) dice que el problema es la señal, no la
+receta.
+
+Los artefactos de la corrida SÍ se conservan en `D:/DECA-datasets/modelos/hardneg-v1/`
+(historia.json, checkpoints), igual que los de todas las corridas nulas anteriores: son la
+evidencia del número que está en la tabla de arriba.
+
+### Balance de la sesión
+
+**Octava y novena palanca medidas, octavo y noveno resultado no positivo** (`card-mask-8ep`
+nulo, `hardneg-v1` negativo). La lista completa de lo que no movió la aguja: `peso_strong`,
+oversampling, scheduler de LR, demográficos, 30 épocas, ensemble, cabezas de patrón, target
+de cardiopatía, hard negative mining.
+
+**Confirma sin ambigüedad la conclusión del 2026-09-08: la fase de modelado está agotada.** El
+techo de ~0,84 AUC / ~0,175 AUPRC / ~41% TPR@5% no es de configuración ni de limpieza de
+datos. Lo que queda son dos cosas, y ninguna es entrenar de nuevo:
+
+1. **Producto.** El modelo ya supera el piso de priorizador (TPR@5% 41,4% ≥ 40,2%) y la banda
+   alta acierta 1 de cada 3 sobre el 1,3% de la población. El cambio del go/no-go a unidades
+   de capacidad sigue **esperando firma explícita de Axel** (propuesta en el hallazgo 10 del
+   2026-08-27, sin tocar desde entonces).
+2. **Datos de otra naturaleza** (sección 5), no más datos de la misma.
+
+**Lo primero pendiente, acordado y no hecho por falta de tiempo en la sesión:** validar las
+cabezas de patrón contra la anotación experta de los 1.304 registros de SaMi-Trop LVSD. Hoy
+están entrenadas con PTB-XL y Challenge 2021 — poblaciones no chagásicas — y **nunca se midió
+si transfieren a pacientes con Chagas**. Si el producto es un priorizador que le dice a un
+médico "testeá a este porque tiene BRD+HBAI", esa cabeza tiene que estar validada en la
+población donde se va a usar. Es la primera vez que hay anotación de cardiólogo sobre
+chagásicos confirmados, y el dataset ya está en el disco. Paso cero: resolver la duda de
+`V21` (advertencia 3 de la sección 5a).
+
+---
+
 ## Fase 5 — Validación y evaluación 🔲
 
 **Tareas:**
