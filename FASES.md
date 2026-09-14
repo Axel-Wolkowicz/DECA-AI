@@ -1724,6 +1724,104 @@ Los artefactos de la corrida SÍ se conservan en `D:/DECA-datasets/modelos/hardn
 (historia.json, checkpoints), igual que los de todas las corridas nulas anteriores: son la
 evidencia del número que está en la tabla de arriba.
 
+**Verificación de la limpieza — hecha a medias, y hay que terminarla.** Lo que SÍ se
+comprobó: `src/dataset.py` volvió byte a byte a HEAD (`git diff` vacío), el diff restante de
+`src/train.py` es solo el trabajo de `--target` de la sesión anterior sin un solo rastro de
+`hard_neg`, `grep -rn "hard_neg\|hard-neg" src/` no devuelve nada, y los dos archivos
+parsean. Lo que **NO** se pudo correr: la corrida de humo posterior a la limpieza — **el SSD
+se desconectó a mitad de sesión** (`D:` desapareció de los volúmenes montados) y sin datos no
+hay pipeline que probar. **Pendiente para la próxima sesión con el disco puesto:**
+`python src/train.py --limit-train 800 --limit-val 2500 --epocas 1`. Es formalidad, pero es
+la formalidad que este repo pide después de tocar `train.py`.
+
+Nota lateral: esto NO es el mismo síntoma que el punto 3 de los pendientes del 2026-09-08
+(ahí la autodetección fallaba con el disco montado y `DECA_DATA_DIR` a mano lo resolvía; acá
+el disco directamente no está y ninguna de las dos vías funciona). Ese ítem sigue sin
+diagnosticar.
+
+### 7. RESULTADO: las cabezas de patrón SÍ transfieren a pacientes chagásicos (la de BRD, perfecto)
+
+Primera validación del proyecto contra **anotación de cardiólogo sobre pacientes con Chagas
+confirmado**. Hasta acá las cabezas de patrón solo se habían medido en PTB-XL y Challenge
+2021 — alemanes de los 90 y una mezcla internacional — o sea nunca en la población donde el
+producto las va a usar. Script: `src/validar_patrones_samitrop.py`.
+
+**Paso cero, resuelto: `V21` está rota y `V20` significa otra cosa de lo que dice.** Se
+comparó cada columna del subset contra las prevalencias publicadas de la cohorte SaMi-Trop
+(n=1.938, Minnesota Code):
+
+| col | anotación | subset (n=1.304) | publicado (n=1.938) | |
+|---|---|---|---|---|
+| V23 | BRI | 3,8% | 4,0% | ok |
+| V18 | onda Q anormal | 12,0% | 10,6% | ok |
+| V19 | ST-T mayor | 10,9% | 11,9% | ok |
+| V26 | fibrilación auricular | 4,9% | 4,4% | ok |
+| V25 | marcapasos | 4,1% | 3,6% | ok |
+| **V20** | BRD | **31,0%** | 19,8% (BRD aislado) | **≈ BRD TOTAL (31,3%)** |
+| **V21** | BRD + HBAI | **0,7%** | **11,5%** | **ROTA** |
+
+Todas las columnas coinciden dentro de 2,5 puntos **menos V21**. Y `V20` (31,0%) coincide con
+el BRD *total* publicado (19,8% + 11,5% = 31,3%), no con el aislado. Además V20 y V21 son
+mutuamente excluyentes (cero pacientes con los dos). Conclusión: **`V20` es "todo BRD" y es
+usable; `V21` no es una marca utilizable de BRD+HBAI y no se usa.** Como no hay columna de
+HBAI aislado, **la cabeza `hbai` no se puede validar con este dataset** — y es justo el
+patrón nº1 del ROADMAP.
+
+**Dos trampas del formato, las dos encontradas midiendo y no leyendo:**
+1. **Orden de derivaciones distinto.** La fuente trae `DI,DII,DIII,AVL,AVF,AVR,V1-V6`; la
+   convención del proyecto es `I,II,III,aVR,aVL,aVF,V1-V6`. Leer en el orden del archivo le
+   entrega al modelo tres derivaciones permutadas — error silencioso, la forma del tensor es
+   correcta y el resultado solo sale "un poco peor".
+2. **Cada examen tiene varios registros y no todos traen las 12 derivaciones.** El equipo
+   graba por grupos: en 903 de 1.638 registros nº1 algunas derivaciones vienen con un solo
+   valor. Quedarse con el registro 1 a ciegas descartaba el 55% del conjunto (572 de 1.304).
+   Tomando **el primer registro con las 12 derivaciones al mismo largo y ≥7 s** quedan **992
+   (76%)**. *No* se cosen derivaciones de registros distintos, aunque llegaría a 1.395: son
+   tramos de tiempo distintos, no simultáneos, y todo el entrenamiento es simultáneo — sería
+   una señal que el modelo nunca vio.
+
+Preprocesado: se importa `procesar_registro` de `preprocess.py` sin reimplementar nada (300 →
+400 Hz con `resample_poly`, ventana centrada de 2.800, z-score por derivación), así una
+diferencia en el resultado no puede venir de deriva del preprocesado. La resolución del
+equipo (3,9 o 5,0 µV/LSB) no se corrige a propósito: el z-score la cancela.
+
+**El resultado.** Mismo checkpoint (`patrones-lr8/mejor.pt`, época 6), AUC contra AUC — el
+AUPRC no compara entre poblaciones porque las prevalencias difieren:
+
+| cabeza | val (NO chagásica) | SaMi-Trop (chagásicos) | delta | prev. SaMi-Trop |
+|---|---|---|---|---|
+| **rbbb** | 0,9808 | **0,9797** | **−0,001** | 32,5% (322) |
+| extra | 0,8646 | 0,8192 | −0,045 | 3,2% (32) |
+| zona | 0,6703 | 0,5218 | −0,148 | 12,6% (125) |
+| hbai | 0,9621 | — | — | no medible (V21 rota) |
+
+**Lectura, que es la que importa para el producto:**
+
+1. **La cabeza de BRD transfiere perfecto: 0,9808 → 0,9797.** La diferencia es ruido. Es la
+   cabeza sobre la que se apoya la explicación del priorizador, y ahora está validada en la
+   población objetivo y no solo en la que la entrenó. **Esto es lo que faltaba para poder
+   decirle a un médico "se prioriza porque hay BRD".**
+2. **`extra` transfiere con una caída moderada** (−0,045) y sigue siendo usable.
+3. **`zona` no transfiere: 0,5218 es cara o cruz.** Confirma —ahora medido en la población
+   objetivo— la sospecha que estaba anotada desde el hallazgo 16 del 2026-08-27: mezclar
+   `ANEUR` (aneurisma, PTB-XL) con `qab` (onda Q anormal, Challenge 2021) fue una mala
+   decisión de etiquetado. **`zona` no se puede mostrar a un clínico.**
+4. **El hueco: `hbai` no se pudo validar.** Va 0,9621 en val, pero es el patrón nº1 del
+   ROADMAP y esta cohorte no permite medirlo. **Queda como la validación pendiente más
+   importante.**
+
+**Exploratorio, no es validación de nada** (ninguna cabeza fue entrenada para esto): contra
+disfunción sistólica (LVEF ≤ 40, 63 casos, 6,4%), los AUC son chagas 0,614 / hbai 0,642 /
+zona 0,583 / rbbb 0,577 / extra 0,471. **Nada predice bien la severidad dentro de
+seropositivos**, que es exactamente lo que ya había medido el paso 2 del 2026-08-27 con
+mortalidad (0,457). Dos datos independientes apuntando a lo mismo: el modelo detecta el
+patrón de conducción, no gradúa el daño.
+
+Nota: el score de Chagas sobre esta cohorte 100% positiva da media 0,726 / mediana 0,929, o
+sea que los reconoce como sospechosos — **pero no es una estimación de sensibilidad**:
+SaMi-Trop es una cohorte de cardiopatía chagásica crónica, enriquecida en enfermos, no una
+muestra de seropositivos generales.
+
 ### Balance de la sesión
 
 **Octava y novena palanca medidas, octavo y noveno resultado no positivo** (`card-mask-8ep`
@@ -1741,20 +1839,132 @@ datos. Lo que queda son dos cosas, y ninguna es entrenar de nuevo:
    2026-08-27, sin tocar desde entonces).
 2. **Datos de otra naturaleza** (sección 5), no más datos de la misma.
 
-**Lo primero pendiente, acordado y no hecho por falta de tiempo en la sesión:** validar las
-cabezas de patrón contra la anotación experta de los 1.304 registros de SaMi-Trop LVSD. Hoy
-están entrenadas con PTB-XL y Challenge 2021 — poblaciones no chagásicas — y **nunca se midió
-si transfieren a pacientes con Chagas**. Si el producto es un priorizador que le dice a un
-médico "testeá a este porque tiene BRD+HBAI", esa cabeza tiene que estar validada en la
-población donde se va a usar. Es la primera vez que hay anotación de cardiólogo sobre
-chagásicos confirmados, y el dataset ya está en el disco. Paso cero: resolver la duda de
-`V21` (advertencia 3 de la sección 5a).
+**Y el único resultado POSITIVO de la sesión, en la sección 7: las cabezas de patrón sí
+transfieren a pacientes chagásicos** — la de BRD prácticamente sin pérdida (0,9808 → 0,9797).
+Es la pata que le faltaba al pivote de producto: un priorizador que se justifica ante un
+clínico necesita que la cabeza que da la explicación esté validada en la población donde se
+usa, y ahora lo está. Con dos salvedades medidas: `zona` no transfiere (0,52, cara o cruz) y
+no debe mostrarse, y `hbai` no se pudo validar porque la columna `V21` del dataset está rota.
+
+**Pendientes concretos que deja la sesión:**
+
+1. **Validar la cabeza `hbai`** — el patrón nº1 del ROADMAP, 0,9621 en val, sin validar en
+   población chagásica. Hace falta una fuente con HBAI anotado en chagásicos; esta cohorte no
+   sirve (sección 7, paso cero).
+2. **Decidir qué hacer con `zona`.** Medida en la población objetivo da 0,52. O se rehace el
+   etiquetado separando aneurisma de onda Q anormal, o se saca del producto. Hoy no es
+   mostrable.
+3. **REDS-II: bajar el Data Dictionary** y resolver si trae señal cruda o solo código
+   Minnesota (sección 5b). Mecha larga, conviene arrancar temprano.
+4. **El go/no-go en unidades de capacidad sigue esperando firma de Axel** (hallazgo 10 del
+   2026-08-27).
 
 ---
 
-## Fase 5 — Validación y evaluación 🔲
+## Fase 5 — Validación y evaluación ✅ (medición única, 2026-09-14)
 
-**Tareas:**
+### RESULTADO SOBRE TEST — `patrones-lr8`, 63.608 registros nunca vistos
+
+Primera y única vez que se toca el test en todo el proyecto. Script: `src/evaluar_test.py`.
+Salida completa en `MODELOS_DIR/test_20260914-114808.json`.
+
+**Checkpoint elegido: `patrones-lr8/mejor.pt` (época 6), y se eligió por PRODUCTO, no por
+métrica.** `abl-peso1` era marginalmente mejor en la métrica operativa de val (41,4% contra
+39,9% de TPR@5%) pero **no tiene cabezas de patrón**, o sea que no puede explicar por qué
+prioriza. Dado que el pivote de producto es "priorizador que se justifica ante un clínico"
+(hallazgo 11 del 2026-08-27), un modelo sin explicación no es el producto. **Queda escrito
+que es una decisión de alcance y no de rendimiento**, tomada antes de mirar el test.
+
+**Umbrales calibrados en validación, arena A, aplicados a test** (Fase 3, "Regla operativa"):
+bajo 0,0169 / alto 0,9301. Se recalcularon sobre val con este mismo checkpoint en vez de leer
+los guardados en el `.pt`.
+
+#### Arena A — la que decide
+
+| métrica | val | **test** | IC95 test (bootstrap de pacientes, 2.000, seed 42) | delta |
+|---|---|---|---|---|
+| AUC | 0,8314 | **0,8348** | [0,8192 – 0,8500] | **+0,0034** |
+| AUPRC | 0,1797 | **0,1569** | [0,1356 – 0,1852] | −0,0228 |
+| TPR@5% | 39,9% | **37,2%** | [33,9% – 41,0%] | −2,7 pp |
+
+**El AUC no se mueve: 0,8314 → 0,8348.** Es el hallazgo central de la Fase 5. Después de
+nueve experimentos, seis meses de decisiones tomadas mirando validación y un checkpoint
+elegido por val, el desempeño fuera de muestra es idéntico. **No hay sobreajuste a la
+validación, y el techo de ~0,84 es real y generaliza.**
+
+La caída de AUPRC y TPR@5% sí es el costo esperable de haber elegido la época mirando val —
+son las métricas sensibles a la prevalencia y al ordenamiento fino de la cola, justo donde la
+selección por máximo sobre serie ruidosa infla el número de val (el sesgo ya medido en el
+hallazgo 13 del 2026-08-27).
+
+#### Punto de operación sobre test
+
+| banda | deriva | PPV | sensibilidad |
+|---|---|---|---|
+| **alta** (PPV≥30% calibrado en val) | **1,4%** | **29,5%** | 21,8% |
+| media (sens 95% calibrado en val) | 62,2% | 2,9% | — (espec. 38,4%) |
+
+**La banda alta se sostiene fuera de muestra: 29,5% de PPV contra el 30% que prometía la
+calibración.** Sobre el 1,4% de la población, 1 de cada 3,4 derivados da positivo, contra 1
+de cada 52 en la población general. **Eso es lo único del producto que hoy está validado en
+test y funciona.**
+
+#### Arenas B, C y diagnóstico de atajo
+
+- **B (SaMi-Trop, solo recall):** 92,2% con umbral bajo, 33,6% con umbral alto. n=232.
+- **C (PTB-XL, solo especificidad):** 29,6% con umbral bajo, **99,0% con umbral alto**. El
+  29,6% no es un fracaso: el umbral bajo deriva al 62% de la gente por construcción.
+- **D (serología ampliada):** AUC 0,8317, AUPRC 0,2381 (232 positivos vs 34.106 negativos).
+  Coherente con arena A, o sea que los positivos serológicos no se comportan distinto —
+  vuelve a confirmar el punto 3 de esta sesión.
+- **Atajo de fuente: −0,0424.** Cómodamente negativo. **El riesgo que motivó excluir PTB-XL
+  del train y que se vigiló durante toda la Fase 4 no se materializó en test.**
+
+#### Cabezas auxiliares sobre test — la capa de explicación, fuera de muestra
+
+| cabeza | AUC | AUPRC | n pos | prev |
+|---|---|---|---|---|
+| **rbbb** | **0,9838** | 0,8024 | 2.033 | 3,2% |
+| **hbai** | **0,9600** | 0,4029 | 341 | 2,7% |
+| **extra** | **0,9034** | 0,6411 | 570 | 4,5% |
+| zona | 0,6826 | 0,0458 | 208 | 1,6% |
+
+**Las tres cabezas útiles aguantan fuera de muestra**, y `extra` incluso mejora respecto de
+val (0,8646 → 0,9034). Sumado a la validación de la sección 7 sobre pacientes chagásicos
+reales (BRD 0,9797), **la capa de explicación está validada por dos vías independientes: en
+test fuera de muestra y contra anotación de cardiólogo en la población objetivo.**
+
+**`zona` queda definitivamente descartada.** 0,6826 en test, 0,5218 en chagásicos. No se
+muestra a un clínico y hay que sacarla del producto o rehacer su etiquetado.
+
+#### Lo que esto le hace al go/no-go, y por qué importa ahora
+
+La propuesta del hallazgo 10 del 2026-08-27 era reemplazar el criterio en AUC por **TPR@5% ≥
+62,7% (despliegue completo) / ≥ 40,2% (solo priorizador)**. Esa propuesta se argumentó con
+números de **validación**, donde `abl-peso1` daba 41,4% y por lo tanto "ya superaba el piso".
+
+**En test el número es 37,2%, con IC95 [33,9% – 41,0%].** O sea que **el modelo NO supera
+claramente el piso de priorizador**: el intervalo toca el 40,2% pero está mayormente por
+debajo. La afirmación "las dos corridas ya superan el piso del solo priorizador" era un
+artefacto de mirar validación.
+
+**Esto no invalida el producto, lo reubica.** Lo que sí está validado en test es la **banda
+alta**: PPV 29,5% derivando al 1,4%. Ese es un caso de uso defendible y medido. Lo que no se
+sostiene es la promesa de "encontrar 4 de cada 10 casos con un cupo del 5%".
+
+**La decisión sobre el go/no-go sigue siendo de Axel y ahora tiene el número honesto sobre el
+cual tomarse.**
+
+### Estado de las tareas originales de la fase
+
+- ✅ Evaluar con la métrica de Fase 3 reportando por fuente: hecho, las 4 arenas + capacidad.
+- 🔲 **Análisis de errores sobre falsos negativos** — pendiente, y es lo que queda de esta
+  fase. Con la banda alta el 78,2% de los casos queda sin derivar; entender *quiénes* son es
+  el trabajo siguiente.
+- ✅ Comparación contra publicados: 0,8348 queda entre el PLOS NTD 2023 (0,80) y el 5º puesto
+  del Moody Challenge 2025 (0,840), o sea **en el estado del arte**, medido fuera de muestra.
+
+**Tareas originales de la fase (del plan, se dejan como registro):**
 - Evaluar con la métrica definida en la Fase 3, reportando por separado el desempeño en cada dataset de origen (no solo agregado).
 - Análisis de errores: revisar falsos negativos en particular, dado el alto costo clínico.
 - Comparar contra el baseline y contra cualquier resultado publicado del Moody Challenge como referencia (sin ser el objetivo a batir).
