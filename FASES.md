@@ -1958,9 +1958,9 @@ cual tomarse.**
 ### Estado de las tareas originales de la fase
 
 - ✅ Evaluar con la métrica de Fase 3 reportando por fuente: hecho, las 4 arenas + capacidad.
-- 🔲 **Análisis de errores sobre falsos negativos** — pendiente, y es lo que queda de esta
-  fase. Con la banda alta el 78,2% de los casos queda sin derivar; entender *quiénes* son es
-  el trabajo siguiente.
+- ✅ **Análisis de errores sobre falsos negativos** — hecho el 2026-09-16, sección propia más
+  abajo. Resultado corto: la banda alta es, operativamente, **un detector de BRD**, y el 78%
+  perdido no es "gente sin nada en el ECG".
 - ✅ Comparación contra publicados: 0,8348 queda entre el PLOS NTD 2023 (0,80) y el 5º puesto
   del Moody Challenge 2025 (0,840), o sea **en el estado del arte**, medido fuera de muestra.
 
@@ -1972,6 +1972,273 @@ cual tomarse.**
 **Dificultades:**
 - **Generalización entre poblaciones.** Buen desempeño en los datasets de entrenamiento no garantiza nada sobre una población distinta (otro país, otro equipo de ECG) — el objetivo final es uso en Argentina, con datos de entrenamiento mayormente brasileños/europeos.
 - **PTB-XL como "negativo" es una simplificación.** Es una población de zona no endémica, no pacientes con serología negativa confirmada para Chagas — puede introducir sesgo si el modelo aprende diferencias poblacionales/equipamiento en vez de ausencia de patología.
+
+---
+
+## SÍNTESIS — qué es y qué no es este modelo (2026-09-14)
+
+**Leer esto primero al retomar el proyecto.** Es la interpretación de los números de la Fase
+5, y no se deduce de ninguna tabla por separado. Escrito el día que se corrió el test.
+
+### Qué quedó construido
+
+Un **priorizador de banda alta**: sobre el 1,4% de la población que marca, **1 de cada 3,4
+tiene Chagas** (PPV 29,5% en test, contra 1 de cada 52 en la población general). Validado
+fuera de muestra, sin sobreajuste (AUC val 0,8314 → test 0,8348), sin atajo de fuente
+(−0,0424), y **con la explicación validada por dos vías independientes** (cabeza de BRD:
+0,9838 en test, 0,9797 contra anotación de cardiólogo en chagásicos reales).
+
+### Qué NO es, y no va a ser
+
+**No es el tamizaje poblacional que el ROADMAP fue a buscar.** El objetivo original —pasar a
+todos por el ECG y derivar a los sospechosos encontrando casi todos los casos— **no es
+alcanzable**, ni por este modelo ni por ninguno publicado. Para encontrar el 95% de los casos
+hay que derivar al 62% de la gente: eso no es filtrar, es testear a casi todos con un paso
+intermedio.
+
+**La banda alta encuentra el 22% de los casos. El otro 78% queda sin marcar.** De ahí se
+sigue la restricción que no admite excepción: **nunca puede comunicarse como descarte.** El
+texto obligatorio ("No se detectaron indicios. Esto no descarta Chagas") no es una precaución
+legal, es literalmente cierto para 4 de cada 5 enfermos.
+
+**Y no está probado en Argentina.** Todos los datos son brasileños y europeos. Es la Fase 6 y
+es un hueco real, no un trámite.
+
+### La pregunta que decide el valor del proyecto: ¿comparado contra qué?
+
+Esto es lo que reencuadra todo, y es una decisión de producto y de política sanitaria, no de
+ingeniería:
+
+- **Contra "hacer serología a todos"** → el modelo es malo: pierde el 78% de los casos.
+- **Contra lo que pasa hoy** —que es esencialmente nada, porque no hay presupuesto ni
+  logística para tamizar a millones— → **es una mejora grande.** Corre sobre un ECG que a la
+  persona ya se le hizo por otro motivo, no cuesta nada, y a un sistema con presupuesto para
+  1.000 serologías le dice dónde gastarlas para encontrar ~300 casos en vez de ~19.
+
+El proyecto no falló en construir un tamizador: **midió que ese tamizador no existe**, y
+construyó la herramienta que sí es posible con la información disponible.
+
+### Estado como proyecto de machine learning: TERMINADO
+
+Nueve palancas medidas, nueve resultados no positivos (`peso_strong`, oversampling, scheduler
+de LR, demográficos, 30 épocas, ensemble, cabezas de patrón para Chagas, target de
+cardiopatía, hard negative mining). Techo confirmado en el estado del arte publicado y
+verificado fuera de muestra. **No queda nada que ajustar.** Cualquier mejora real necesita
+datos de otra naturaleza —cardiopatía diagnosticada por ecocardiograma, no serología— y eso
+es adquisición de datos, no modelado. Las dos vías concretas están en la sección 5 de la
+sesión del 2026-09-10 (SaMi-Trop LVSD ya descargado; REDS-II por pedir).
+
+**Corrección del 2026-09-16 sobre el *motivo* del techo** (no sobre el techo, que sigue en
+pie): la explicación que se venía dando —"el techo es ruido de etiqueta, serología positiva sin
+cardiopatía"— quedó medida y **cubre solo el 20% de los casos perdidos**. El techo real es que
+la banda alta tiene un único detector, el de BRD. No cambia que no quede nada que ajustar
+entrenando, **ni cambia cuáles son las dos vías de datos**: el addendum de esa misma sesión
+midió que anotar más patrones de ECG tampoco alcanza (el 82,7% de los perdidos relevantes no
+tiene ninguno de los 6 diagnósticos de CODE-15%), así que las vías siguen siendo SaMi-Trop
+LVSD y REDS-II, o sea ecocardiograma.
+
+### Lo que queda, en orden, y ninguno es código de modelo
+
+1. **Decisión de alcance de Axel:** aceptar o no que el producto es un priorizador de banda
+   alta y no un tamizaje. Reescribe lo que DECA promete al usuario.
+2. **Firma del go/no-go** (hallazgo 10 del 2026-08-27). Ahora tiene el número honesto sobre
+   el cual decidirse: **TPR@5% en test es 37,2% [33,9 – 41,0]**, no el 41,4% de validación
+   con el que se escribió la propuesta — o sea que **NO supera claramente el piso de 40,2%**
+   que la propia propuesta fijaba para "solo priorizador". Lo que sí está validado es la
+   banda alta.
+3. **Sacar `zona` del producto** o rehacer su etiquetado: 0,6826 en test, 0,5218 en
+   chagásicos. No es mostrable a un clínico.
+4. ~~**Análisis de falsos negativos**~~ — ✅ **hecho el 2026-09-16**, sesión propia al final de
+   este documento. Dos cosas que hay que saber antes de seguir: la banda alta es
+   operativamente **un detector de BRD** (73,3% de sensibilidad con BRD anotado, 10,4% sin él),
+   y **el "no hay nada que leer" explica solo el 20% de la pérdida**, no el grueso. Hay además
+   un **sesgo de resultado por sexo** (mujeres 18,5% vs varones 27,3%), mediado por la menor
+   prevalencia de BRD en mujeres y no por un trato distinto a igual ECG — hay que declararlo en
+   el producto con el mecanismo.
+5. **Validar la cabeza `hbai`** en población chagásica (patrón nº1 del ROADMAP, 0,96 en test,
+   sin validar en chagásicos porque la columna `V21` del dataset SaMi-Trop LVSD está rota).
+6. **Validación en Argentina** (Fase 6).
+
+---
+
+## Sesión del 2026-09-16 — quiénes son los falsos negativos: la banda alta es un detector de BRD
+
+Cierra la última tarea abierta de la Fase 5 (item 4 de la síntesis). Script:
+`src/analisis_errores.py`. Salida: `MODELOS_DIR/analisis_fn_20260916-152548.json`, más el
+artefacto reutilizable `test_scores_20260916-152548.parquet` (score de Chagas + las 4 cabezas
+por registro de test) — cualquier pregunta futura sobre test se responde contra ese parquet
+sin volver a pasar por la GPU (`--solo-analisis`).
+
+**Esto NO es una segunda medición de test.** Mismo checkpoint congelado (`patrones-lr8`),
+mismos umbrales recalibrados en val (salieron 0,0169 / 0,9301, idénticos a los de la medición
+del 2026-09-14, lo cual es de por sí una verificación de que se está mirando el mismo punto de
+operación). No se eligió época, ni umbral, ni variante, y nada se retoca a partir de esto. Es
+descriptivo. Las sensibilidades reproducen exacto las publicadas: arena A 21,8%, arena B 33,6%.
+
+### La hipótesis cómoda es falsa
+
+Se entró con dos hipótesis opuestas: **(a)** los perdidos no tienen nada legible en el trazado
+—fase indeterminada, sin cardiopatía— y entonces el techo es ruido de etiqueta y el proyecto
+está cerrado como ML; **(b)** los perdidos tienen patrón visible y el modelo igual no los
+levanta, y entonces hay un hueco de modelado nombrable.
+
+**De los 521 perdidos de arena A, solo el 20,0% [16,8–23,6] es "ECG anotado normal y ninguna
+cabeza encendida".** La hipótesis (a) explica **un quinto** de la pérdida, no el grueso. En
+arena B (serología, la etiqueta que vale) es 22,1% [16,3–29,3]. El resto —casi el 80%— tiene
+el ECG anotado como anormal.
+
+| de los perdidos, con anotación de ECG | arena A (n=521) | arena B (n=154) |
+|---|---|---|
+| ECG normal / sin patrón | 20,0% | 22,1% |
+| ECG normal / con patrón | 0,6% | 2,6% |
+| **ECG anormal / sin patrón** | **53,2%** | 36,4% |
+| ECG anormal / con patrón | 26,3% | **39,0%** |
+
+*"Con patrón" = alguna de las cabezas `rbbb`/`hbai`/`extra` supera el percentil 95 de esa misma
+cabeza entre los negativos de arena A (punto de operación al 5% de FPR, definido mirando solo
+negativos para que no pueda inflarse con los positivos). `zona` queda afuera: 0,5218 en
+chagásicos, es ruido.*
+
+**Salvedad que hay que leer junto con la tabla:** `ecg_anormal` es un proxy grueso —"hay algo
+raro en el trazado", no "cardiopatía chagásica"— y el **58,3% de los negativos de arena A
+también da anormal**. O sea que el 79,5% de los perdidos es elevado pero no dramáticamente
+sobre la base. La tabla descarta (a) como explicación mayoritaria; no prueba por sí sola que
+haya cardiopatía en los perdidos.
+
+### El hallazgo central: el punto de operación es la cabeza de BRD, casi literalmente
+
+Estratificando los 666 positivos de arena A por la **anotación real de BRD** de
+`code15/exams.csv` (no por el score de la cabeza):
+
+| | n | sensibilidad de la banda alta |
+|---|---|---|
+| con BRD anotado | 120 | **73,3% [64,8 – 80,4]** |
+| sin BRD anotado | 546 | **10,4% [8,1 – 13,3]** |
+
+Y estratificando por el score de la cabeza, el contraste es todavía más crudo: entre positivos
+con la cabeza de BRD encendida la sensibilidad es 68,8% (mujeres) / 63,6% (varones); entre los
+que la tienen apagada, **0,3% y 7,0%**. Sin BRD, la banda alta es prácticamente inaccesible.
+
+Esto es la versión fuerte y fuera de muestra del hallazgo 14 del 2026-08-27 ("el score ES, en
+gran medida, la señal de BRD"). Ahí se midió sobre el score; acá se mide sobre la etiqueta
+clínica y sobre el punto de operación que efectivamente se usaría.
+
+**Dos consecuencias que tiran para lados distintos:**
+
+1. **El modelo no está fallando en lo que sabe hacer.** De los 521 perdidos, solo el **6,1%
+   (32 pacientes)** tiene BRD anotado. No hay una masa de BRD visible que se esté escapando:
+   agarra ~73% de los que lo tienen. La hipótesis (b) en su versión fuerte tampoco se sostiene.
+2. **Lo que falta no es precisión sino señal nombrable.** Los 277 perdidos con ECG anormal y
+   sin patrón tienen **0,4% de BRD anotado**: son anormalidades reales que no son ninguno de
+   los tres patrones del ROADMAP. El modelo no tiene con qué nombrarlas — y el addendum de
+   más abajo mide que **tampoco las nombra ninguna otra etiqueta que tengamos**.
+
+**Pero la información no es cero en esos 277:** su score mediano de Chagas es **0,375**, contra
+**0,048** de los negativos comparables (ECG anormal, sin patrón). El modelo los rankea ~8 veces
+más alto que a un negativo equivalente — ve algo, sub-umbral. Eso es exactamente lo que
+significa tener AUC 0,83 con una banda alta que es un detector de BRD: la discriminación está
+repartida en toda la curva, la banda alta captura solo la punta.
+
+### Addendum: lo que falta NO es vocabulario de patrones
+
+CODE-15% trae **seis** columnas diagnósticas en `exams.csv` —`1dAVb`, `RBBB`, `LBBB`, `SB`,
+`ST`, `AF`— y el proyecto entero usó solo `RBBB`. Como los 277 perdidos con ECG anormal y sin
+patrón son el grupo que define lo que falta, se los cruzó contra las otras cinco. Estaba todo
+en disco, no hizo falta etiquetar nada.
+
+| grupo | n | 1dAVb | RBBB | LBBB | SB | ST | AF | **sin ningún dx** |
+|---|---|---|---|---|---|---|---|---|
+| perdidos (FN) | 521 | 3,5% | 6,1% | 3,1% | 4,2% | 0,8% | 4,8% | **79,5%** |
+| └ los 277 huérfanos | 277 | 4,3% | 0,4% | 4,7% | 3,6% | 1,1% | 4,0% | **82,7%** |
+| encontrados (TP) | 145 | 6,9% | **60,7%** | 2,1% | 3,4% | 0,0% | 6,2% | 33,8% |
+| negativos | 34.106 | 1,5% | 2,1% | 1,6% | 1,6% | 2,3% | 1,6% | 90,1% |
+
+**El 82,7% de los huérfanos no tiene NINGUNO de los seis diagnósticos**, aunque `normal_ecg`
+los marque como anormales. Solo el 17,0% tiene alguno de los otros cinco. O sea que **la
+hipótesis "falta vocabulario de patrones" queda medida y es falsa en su versión útil**: no es
+que haga falta una cabeza de LBBB, de AF o de bloqueo AV. Lo que `normal_ecg` está viendo en
+esos pacientes **cae afuera de toda taxonomía etiquetada que tengamos** — ni los 3 patrones del
+ROADMAP, ni los 6 diagnósticos de CODE-15%.
+
+Y sumar esas cinco cabezas tampoco compraría sensibilidad, porque la banda alta ya rankea bajo
+a los positivos que las tienen:
+
+| dx presente en positivos de arena A | n | sensibilidad banda alta |
+|---|---|---|
+| RBBB | 120 | **73,3%** [64,8 – 80,4] |
+| 1dAVb | 28 | 35,7% [20,7 – 54,2] |
+| AF | 34 | 26,5% [14,6 – 43,1] |
+| SB | 27 | 18,5% [8,2 – 36,7] |
+| LBBB | 19 | 15,8% [5,5 – 37,6] |
+| ST | 4 | 0,0% [0,0 – 49,0] |
+| **ninguno de los seis** | **463** | **10,6%** [8,1 – 13,7] |
+
+El grueso de la pérdida —463 de 666 positivos— son pacientes **sin ningún hallazgo codificado**,
+y ahí la sensibilidad es 10,6%.
+
+**Esto corrige la conclusión de la sección anterior y hay que leerlo en su lugar.** Arriba
+quedó escrito que el camino restante era "vocabulario de patrones no-BRD"; medido, no lo es.
+El camino restante es el que FASES.md ya venía diciendo desde el 2026-09-10 (sección 5):
+**cardiopatía confirmada por ecocardiograma**, no más etiquetas de ECG. SaMi-Trop LVSD y
+REDS-II siguen siendo las dos vías concretas, y son adquisición de datos.
+
+*Salvedad:* `normal_ecg` en CODE-15% no está definido como "alguno de los seis dx" —por eso
+existe ese 82,7%— y no sabemos exactamente qué criterio usaron. No se puede concluir de acá que
+esos 277 tengan cardiopatía chagásica; sí que tienen *algo* anotado como anormal que ninguna
+etiqueta disponible nombra.
+
+### Sesgo por sexo: real en el resultado, mediado por el BRD
+
+| arena A, positivos | n | sensibilidad banda alta |
+|---|---|---|
+| mujeres | 421 | **18,5% [15,1 – 22,5]** |
+| varones | 245 | **27,3% [22,1 – 33,2]** |
+
+Los intervalos apenas se tocan. **A las mujeres se las encuentra menos**, y son el 65,8% de los
+perdidos contra el 53,8% de los encontrados. Arena B va en la misma dirección (31,9% vs 37,5%)
+pero con n chico y sin significación.
+
+**El mecanismo está medido y no es una miscalibración por sexo:**
+- Dentro de los positivos con BRD, la sensibilidad es **igual o mejor en mujeres** (68,8% vs
+  63,6%).
+- El AUC dentro de cada sexo es prácticamente el mismo: **0,8339 (F) vs 0,8422 (M)**.
+- Lo que difiere es la **prevalencia de BRD entre positivas: 26,6% en mujeres vs 35,9% en
+  varones** (y 3,6% vs 7,0% entre negativos, o sea que el gradiente por sexo del BRD existe en
+  la población general y no es un artefacto de los positivos).
+
+O sea: el modelo no trata distinto a una mujer con el mismo ECG. La disparidad aparece porque
+**el modelo solo sabe buscar BRD y las mujeres con Chagas tienen menos BRD**. Es un sesgo de
+resultado reportable —el producto encuentra menos mujeres— y hay que declararlo así, con el
+mecanismo, no como "sesgo del algoritmo" a secas.
+
+Por edad no hay patrón sistemático: todas las décadas caen entre 16,8% y 27,7% con intervalos
+que se solapan (el 6,2% de los menores de 30 es n=16, IC [1,1 – 28,3], no es un hallazgo).
+
+### Qué le hace esto al estado del proyecto
+
+**No reabre el modelado.** Las nueve palancas medidas siguen negativas y no hay máquina ni
+tiempo para entrenar; nada de esto se contradice. Lo que cambia es **la explicación de por qué
+hay techo**, y era la explicación equivocada:
+
+- Antes: "el techo es ruido de etiqueta —serología positiva sin cardiopatía— y por eso no hay
+  nada que hacer". **Eso cubre el 20% de la pérdida, no el 78%.**
+- Ahora: el techo es que la banda alta tiene **un solo detector**, y el 94% de los perdidos no
+  tiene ese hallazgo aunque la mayoría tenga *algún* hallazgo.
+
+Para el producto esto es, si se quiere, tranquilizador: **la capa de explicación no miente.**
+Cuando el sistema deriva a alguien y muestra "BRD", eso es efectivamente lo que disparó la
+derivación en ~3 de cada 4 casos. El priorizador de banda alta se justifica ante un clínico
+porque *realmente* es lo que dice ser.
+
+Sobre el camino de mejora, ver el **addendum** más abajo: la salida intuitiva —"anotar más
+patrones"— se midió el mismo día y **no sirve**. Sigue siendo adquisición de datos y no
+modelado, pero de datos de otra naturaleza (ecocardiograma), no de más etiquetas de ECG.
+
+### Consecuencia menor ya aplicada
+
+`zona` queda excluida de la evidencia de patrón en `analisis_errores.py`, documentado en el
+módulo (item 3 de la síntesis). Sacarla del modelo requeriría reentrenar; sacarla de lo que se
+le muestra a un clínico no, y es lo que corresponde hacer.
 
 ---
 
