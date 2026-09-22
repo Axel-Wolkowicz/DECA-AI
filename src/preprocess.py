@@ -36,56 +36,25 @@ from collections import Counter
 import h5py
 import numpy as np
 import pandas as pd
-from scipy.signal import resample_poly
 from tqdm import tqdm
 
 from config import FASE2_HDF5, FASE2_METADATA_PATH, SPLIT_CONGELADO_PATH
 from eda_utils import cargar_metadata, path_para
 from split_patients import asignar_split
 
-OUT_FREQ = 400
-WINDOW_SEC = 7.0
-WINDOW_SAMPLES = int(WINDOW_SEC * OUT_FREQ)  # 2800
-
-
-def recortar_padding(señal: np.ndarray) -> np.ndarray:
-    ceros = np.all(señal == 0, axis=1)
-    n = len(ceros)
-    inicio = 0
-    while inicio < n and ceros[inicio]:
-        inicio += 1
-    fin = 0
-    while fin < n - inicio and ceros[n - 1 - fin]:
-        fin += 1
-    return señal[inicio : n - fin] if fin > 0 else señal[inicio:]
-
-
-def procesar_registro(señal: np.ndarray, frecuencia_nativa: int) -> tuple[np.ndarray | None, str]:
-    """Devuelve (ventana normalizada, "ok") o (None, motivo del descarte)."""
-    tramo = recortar_padding(señal)
-    if tramo.shape[0] / frecuencia_nativa < WINDOW_SEC:
-        return None, "corto"
-
-    # Se chequea sobre el tramo entero y antes de resamplear: resample_poly es una
-    # convolucion, asi que un solo NaN fuera de la ventana se esparciria hacia adentro.
-    if not np.isfinite(tramo).all():
-        return None, "corrupto"
-
-    if frecuencia_nativa != OUT_FREQ:
-        g = np.gcd(int(frecuencia_nativa), OUT_FREQ)
-        tramo = resample_poly(tramo, up=OUT_FREQ // g, down=int(frecuencia_nativa) // g, axis=0)
-
-    n = tramo.shape[0]
-    if n < WINDOW_SAMPLES:
-        return None, "corto"  # margen ante redondeo del resampleo, no deberia pasar
-
-    inicio = (n - WINDOW_SAMPLES) // 2
-    ventana = tramo[inicio : inicio + WINDOW_SAMPLES].astype(np.float32)
-
-    media = ventana.mean(axis=0)
-    desvio = ventana.std(axis=0)
-    desvio[desvio < 1e-8] = 1.0  # derivacion plana: no dividir por 0, dejarla sin escalar
-    return (ventana - media) / desvio, "ok"
+# La ventana vive en ventana.py, no aca. El motivo esta en el docstring de ese modulo:
+# este archivo importa config.py, que resuelve la ruta del SSD al importarse, asi que
+# nada que dependa de preprocess.py puede correr sin el disco enchufado -- y el servicio
+# de inferencia (servidor.py) tiene que preprocesar exactamente igual sin tener el corpus.
+# Se re-exportan los cinco nombres para no romper a quien ya importaba de aca
+# (validar_patrones_samitrop.py lo hace).
+from ventana import (  # noqa: F401  (re-export intencional)
+    OUT_FREQ,
+    WINDOW_SAMPLES,
+    WINDOW_SEC,
+    procesar_registro,
+    recortar_padding,
+)
 
 
 def main():

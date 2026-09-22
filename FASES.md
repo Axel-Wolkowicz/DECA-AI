@@ -1694,11 +1694,12 @@ matar.** `https://biolincc.nhlbi.nih.gov/studies/chagas/`
   chagásica.** Esa es exactamente la distinción que el modelo no puede hacer hoy y que ningún
   dataset nuestro contiene.
 - Pedido por formulario, registro gratuito.
-- **DUDA CRÍTICA SIN RESOLVER:** la descripción dice "12-lead resting ECGs **classified by
-  Minnesota code criteria**", lo que sugiere que guardaron los hallazgos codificados y **no la
-  señal cruda**. Sin señal no sirve para nada nuestro. Está en el Data Dictionary PDF, que se
-  baja sin registrarse. **Es lo primero a chequear** — la mecha del pedido es de semanas o
-  meses, y no conviene ni arrancarlo ni descartarlo a ciegas.
+- ~~**DUDA CRÍTICA SIN RESOLVER:**~~ **RESUELTA EL 2026-09-17, Y MATÓ LA VÍA.** La sospecha era
+  correcta: el Data Dictionary confirma que **no hay señal cruda**, solo hallazgos codificados
+  (`CEKG_*` en código de Minnesota, `LEKG_VAR*` categóricos). Las ~460 variables son escalares
+  o strings de ≤200 caracteres. **REDS-II no se pide.** Ver la sesión del 2026-09-17 al final,
+  que además documenta el segundo bloqueo (BioLINCC exige RMDA institucional + IRB + rango de
+  investigador senior) y lo poco que igual valdría la pena si alguna vez se destraba.
 
 **c) Moody Challenge 2025 — nada nuevo.** Lo público es exactamente lo que ya tenemos
 (CODE-15%, SaMi-Trop, PTB-XL). REDS-II y SaMi-Trop-3 están secuestrados como conjunto de test
@@ -2242,11 +2243,237 @@ le muestra a un clínico no, y es lo que corresponde hacer.
 
 ---
 
+## Sesión del 2026-09-17 — REDS-II descartado, y qué queda para conseguir datos
+
+Se resolvió la **DUDA CRÍTICA SIN RESOLVER** que quedó abierta en la sección 5 del 2026-09-10.
+La respuesta cierra esa vía.
+
+### REDS-II: NO TIENE SEÑAL CRUDA. Descartado.
+
+Se bajó el Data Dictionary (`REDS_II_Chagas_v2015a.pdf`, 17 páginas, público, sin registro:
+`https://biolincc.nhlbi.nih.gov/media/studies/chagas/data_dictionary/REDS_II_Chagas_v2015a.pdf`)
+y se extrajo entero. **Las ~460 variables son todas `Num 8` o `Char N` (máx. 200)** — escalares
+y strings cortos. No hay ni una variable de forma de onda, ni una referencia a un archivo de
+señal externo.
+
+Todo lo de ECG son **hallazgos codificados**: `CEKG_MAJOR1..10` / `CEKG_MINOR1..11` (código de
+Minnesota, leídos centralmente) y `LEKG_VAR1..25` (lectura local, categórica). Los únicos
+matches de "wave" en el documento son etiquetas del estilo `CEKG_MAJOR2 = "Major Q Wave
+abnormalities"`, o sea el nombre del hallazgo, no la señal.
+
+**Nuestro modelo come un `(2800, 12)`. REDS-II entrega la planilla de lo que vio un cardiólogo.
+No sirve para entrenar ni para evaluar el modelo.** La sospecha del 2026-09-10 era correcta y
+se confirma: se evita un trámite de semanas o meses que no iba a ningún lado.
+
+**Segundo bloqueo, independiente del primero.** BioLINCC exige un **RMDA** (Research Materials
+Distribution Agreement) firmado por **la institución** del solicitante, y el solicitante tiene
+que ser empleado permanente con rango equivalente a **profesor tenure-track o investigador
+senior, residente en el mismo país que su institución**, más evidencia de aprobación de IRB. No
+es un formulario: es un convenio institucional. Aunque tuviera la señal, no se consigue sin un
+PI académico senior que lo firme.
+
+**Lo que sí tiene, y por qué igual vale anotarlo:** `EXP_VARA1/2/3` (tres revisores contestando
+"si este paciente fuera seropositivo, ¿diagnosticaría cardiopatía chagásica?"), `EXP_VARB/VARC_*`
+(¿tiene otra cardiopatía? coronaria, valvular, hipertensiva, pulmonar, congénita) y
+`LECHO_VAR1..4` — entre ellas **`LECHO_VAR2 = Apical Aneurysm`**, que es la fuente del patrón nº3
+del ROADMAP. Es el dataset ideal para una pregunta *epidemiológica* —qué hallazgos codificados
+usa realmente un panel para llamar cardiopatía chagásica, que es justo lo que el addendum del
+2026-09-16 dice que no sabemos— pero no para una de señal. Queda registrado por si alguna vez
+aparece la vía institucional; **no se pide**.
+
+### SaMi-Trop LVSD: confirmado que SÍ trae señal. Es lo único que queda sin portero.
+
+Ya está en `D:/DECA-datasets/samitrop-lvsd/x/`, extraído desde el 2026-09-10. Verificado hoy:
+
+- `AI-ECG-LVSD-Chagas_Sami-Trop_data.csv` (93 KB) — las variables clínicas, incluida `V2` (FE
+  por ecocardiograma) y los patrones anotados por cardiólogo.
+- `AI-ECG-LVSD-Chagas_Sami-Trop_data_trace.csv` (649 MB) — **señal real, 12 derivaciones**, una
+  fila por registro, cada derivación como lista de enteros separados por coma.
+
+**Tres trampas técnicas, medidas en la cabecera del archivo, antes de escribir código:**
+
+1. **El orden de derivaciones NO es el canónico del proyecto.** El archivo trae
+   `DI;DII;DIII;AVL;AVF;AVR;V1..V6` — o sea **aVL, aVF, aVR**, mientras nuestra convención
+   (FASES.md Fase 0) es `I, II, III, aVR, aVL, aVF, V1..V6`. Cargarlo por posición mete tres
+   derivaciones cruzadas en silencio. Hay que reordenar por nombre.
+2. **Muestreo 300 Hz**, no 400 — hay que resamplear, como se hizo con PTB-XL (500→400).
+3. **Hay filas vacías**: las tres primeras del archivo tienen todas las derivaciones en blanco.
+   Filtrar antes de contar registros, o el N sale inflado.
+
+Sumado a lo ya sabido: **no tiene ni un negativo** (responde "¿este chagásico tiene el corazón
+dañado?", no "¿tiene Chagas?"), su `ID_exam` **no cruza** con nuestro `exam_id` de SaMi-Trop
+(espacios de ID distintos, 9 dígitos contra 6) y por eso hay que usar sus propias señales, y
+**`V21` sigue rota** (el bloqueo de la cabeza `hbai`).
+
+### Estado de la adquisición de datos, en una línea
+
+De las dos vías que FASES.md venía nombrando desde el 2026-09-10, **una está descartada
+(REDS-II) y la otra ya está en el disco (SaMi-Trop LVSD)**. No hay nada que "conseguir": no
+queda ningún dataset público con serología + señal cruda que no tengamos. Lo que falta es
+trabajo sobre lo que ya hay, o una fuente argentina, que es la Fase 6.
+
+---
+
+## Sesión del 2026-09-22 — el modelo se vuelve un servicio: contrato con DECA-Back
+
+Primera sesión que no es de modelado. Cierra **la segunda tarea de la Fase 6** ("definir el
+contrato de entrada/salida entre este módulo de IA y el Backend"), incluida la dificultad
+que esa fase ya anticipaba: *"el formato de entrada del usuario final vs. el formato de
+entrenamiento... puede requerir una etapa adicional de conversión no contemplada en el
+training"*. Era cierto, y esa etapa es la mitad del trabajo de esta sesión.
+
+### Punto de partida: en el backend no hay ECG en ningún lado
+
+Leído [DECA-Back](https://github.com/bf0880-boop/DECA-Back) entero. `POST /analisis` recibe
+`{ pacienteId, porcentaje }` y **el médico tipea el porcentaje a mano**; la tabla `analisis`
+guarda sólo ese número y una fecha. No hay upload, no hay archivo, no hay llamada a ningún
+modelo. O sea que "vincular el modelo con el backend" no era conectar dos piezas que ya
+existían: era construir la que falta.
+
+### Decisión 1 — servicio Python aparte, no el modelo adentro de Node
+
+DECA-Back corre en Vercel serverless: no puede ejecutar PyTorch ni lanzar un proceso Python.
+Las tres opciones y por qué se descartan dos:
+
+| Opción | Veredicto |
+|---|---|
+| ONNX + `onnxruntime-node` | No entra: 78 MB de modelo más el runtime nativo contra los 250 MB de bundle |
+| Reescribir el preprocesamiento en JS | **El motivo real del descarte** |
+| Lanzar un proceso Python desde Node | Imposible en serverless |
+
+El punto no es el esfuerzo de reescribir `resample_poly` y el z-score en JavaScript, es que
+**si el preprocesamiento no es idéntico al de la Fase 2, el 0,8348 de AUC deja de aplicar al
+número que devuelve la API — y no hay forma de enterarse mirando la salida.** Una
+implementación paralela que difiera en el redondeo del resampleo o en el centrado de la
+ventana produce scores plausibles y mal calibrados, para siempre. Así que la señal la
+procesa el mismo código que procesó el corpus, y el backend habla HTTP.
+
+### Decisión 2 — `ventana.py`: el preprocesamiento se separa de las rutas del SSD
+
+`preprocess.py` importa `config.py`, y `config.py` resuelve la ruta del SSD **al
+importarse**. Consecuencia que nadie había notado porque nunca había hecho falta: *era
+imposible preprocesar un ECG sin tener el disco de 47 GB enchufado.* El servicio corre en
+una máquina que no va a tener el corpus nunca.
+
+`recortar_padding` y `procesar_registro` se mudaron a `src/ventana.py`, sin dependencias
+más allá de numpy/scipy y sin un solo cambio de lógica. `preprocess.py` los reexporta, así
+que `validar_patrones_samitrop.py` —que los importaba de ahí— sigue funcionando igual.
+
+### Decisión 3 — las derivaciones van por nombre, siempre
+
+`src/lectura_ecg.py` convierte lo que llegue en una matriz `(n, 12)` canónica. La regla que
+lo ordena todo: **nunca se cargan derivaciones por posición**, y todo nombre que no se
+reconozca es un error, no algo que se ignore.
+
+Es la trampa de SaMi-Trop LVSD generalizada. Su orden es `DI,DII,DIII,AVL,AVF,AVR,V1..V6`:
+leerlo posicionalmente no falla, devuelve un ECG con aVR y aVL intercambiadas que el modelo
+puntúa mal y que en producción no detecta nadie jamás. En un corpus eso aparece como una
+métrica rara; en un paciente, no aparece.
+
+Lo que sale de ahí, todo verificado contra señal real del corpus:
+
+- **Alias**: `DI`/`D1`/`L1` → `I`, `VR` → `aVR`, `C1..C6` → `V1..V6`, prefijos tipo
+  `MDC_ECG_LEAD_`, mayúsculas/minúsculas, espacios.
+- **8 derivaciones alcanzan**: con I, II y las 6 precordiales se reconstruyen III, aVR, aVL
+  y aVF con las identidades de Einthoven y Goldberger. Son exactas, no aproximaciones.
+- **Las unidades no importan** — mV, µV o cuentas de ADC dan lo mismo, porque el z-score de
+  la Fase 2 normaliza cada derivación contra sí misma. Por la misma razón se aceptan
+  `VR`/`VL`/`VF` como las aumentadas: difieren en un factor 1,5 constante que el z-score
+  borra. Corolario incómodo del mismo hecho: **la amplitud relativa entre derivaciones nunca
+  llega al modelo**, ni acá ni en entrenamiento.
+- **Coma decimal y `;`**: una exportación hecha con Excel en español se lee bien.
+- **Un bug atajado al escribirlo**: la conversión de coma decimal borra los puntos (son
+  separador de miles en esa convención), así que aplicarla a una columna que ya venía con
+  punto decimal convierte `0.123` en `123` **sin fallar** — un ECG con la amplitud ×1000
+  que el z-score después normaliza y deja indistinguible. Se prueba primero la lectura
+  directa y sólo si falla la otra.
+
+Lo que no lee y no va a leer: **una foto o un PDF del ECG impreso**. El modelo come señal
+digital; digitalizar papel es un problema de investigación aparte.
+
+### Decisión 4 — se reporta percentil, no la sigmoide
+
+La decisión de fondo de la sesión, y la tomó Axel entre tres opciones.
+
+La columna del backend se llama `porcentaje` y la especificación dice "porcentaje de
+posibilidad de tener una cardiopatía chagásica". Devolver ahí la sigmoide ×100 era lo
+natural y es **incorrecto**: el umbral de la banda alta está en 0,930, y ahí el VPP medido
+es 29,5 %. Mostrar "93 %" es errarle por un factor de tres, en el sentido que más daño hace.
+
+Lo que se reporta es el **percentil de riesgo**: dónde cae ese ECG en la distribución de
+scores de una población de referencia. `percentil: 98,7` se lee "puntúa más alto que el
+98,7 % de los ECG de referencia" — literalmente cierto, útil para priorizar, y no se
+disfraza de probabilidad de enfermedad. La banda (`alta`/`media`/`baja`) viaja al lado con
+su VPP medido.
+
+Se agrega una banda que ningún script reportaba: **`baja`, con VPN 99,76 % y 37,8 % de la
+población**. Sale de aritmética sobre los números ya publicados de test, no de una medición
+nueva. Importa porque es la única que le dice al médico cuánto vale un resultado negativo —
+y que el 4,7 % de los casos reales cae ahí.
+
+### Decisión 5 — la calibración sale de validación, y en float32
+
+`calibrar_servicio.py` construye `models/patrones-lr8/calibracion.json` (207 KB): umbrales,
+grid de 10.001 percentiles, orden de las cabezas de patrón y hashes. Sobre **val / arena A,
+a nivel paciente** — la misma regla de la Fase 3. Calcular el percentil sobre test habría
+gastado una segunda mirada para obtener algo que val da igual de bien. De test se leen sólo
+números ya publicados del JSON del 2026-09-14, que es la propiedad que CLAUDE.md pide
+conservar para `analisis_errores.py --solo-analisis`.
+
+Se calibra en float32 porque es lo que usa el servicio, mientras que `evaluar_test.py` usa
+float16 con autocast. **Medido: la diferencia entre los umbrales de una precisión y la otra
+es 5,0e-06 (bajo) y 5,1e-05 (alto)** — o sea que las métricas de banda medidas en test
+aplican tal cual al servicio. Sin ese chequeo habría quedado la duda.
+
+El servicio **se niega a arrancar si el sha256 del checkpoint no coincide con el de la
+calibración**: una calibración de otro modelo da percentiles sin sentido y la salida se ve
+exactamente igual de bien.
+
+### Verificación: el servicio reproduce los scores congelados
+
+La prueba que importaba. Se tomaron 18 registros de test (code15, samitrop, ptbxl; mitad al
+azar, mitad de score alto), se exportó su señal **cruda** como si la mandara un hospital y
+se la hizo pasar por el servicio entero, comparando contra `test_scores_20260916.parquet`:
+
+**diferencia máxima 1,65e-04, mediana 1,51e-05** — exactamente el ruido fp16/fp32. La cadena
+lectura → reordenamiento → Fase 2 → red es idéntica a la validada.
+
+Tres PTB-XL daban CSV ≠ JSON bit a bit, lo que habría sido un bug de reordenamiento. No lo
+era: el camino JSON reproduce la señal cruda **exacto** (diferencia 0,0) y el CSV difiere
+5,9e-08 porque `pandas.to_csv` redondea float32 al escribirlo como texto. Artefacto del
+fixture de prueba, no del lector.
+
+### Hallazgo: el modelo no sabe si lo que recibió es un ECG
+
+Se le dio ruido blanco. Devolvió **score 0,615, percentil 92,45, banda media**, con total
+aplomo. Los controles de calidad atajan señal corta (<7,0 s), corrupta (NaN/inf) y plana
+(7+ derivaciones muertas), pero **ninguno detecta "esto no es un electrocardiograma"**. Es
+esperable —nunca se entrenó para eso— y es una limitación real de producto: el archivo que
+llega tiene que venir de un equipo real, y eso lo tiene que garantizar el flujo, no el
+modelo. Queda documentado en `API.md`.
+
+### Lo que quedó hecho y lo que no
+
+**Hecho** (todo en este repo, `src/`): `ventana.py`, `lectura_ecg.py`, `inferencia.py`,
+`servidor.py`, `calibrar_servicio.py`, `requirements-api.txt` y `API.md` con el contrato
+completo. **471 ms por análisis en CPU**, así que servir no necesita GPU.
+
+**No hecho, por decisión explícita**: no se tocó DECA-Back. `API.md` dice qué habría que
+agregar (endpoint multipart, tres columnas en `analisis`, dos variables de entorno) pero el
+repo es de otra persona y el cambio no se hizo.
+
+**Abierto**: dónde se hostea el servicio. Vercel no puede alcanzar una laptop detrás de un
+NAT, así que hace falta una URL pública; con CPU alcanza. Y el formato real de los hospitales
+sigue sin definirse — por eso los lectores son enchufables: agregar SCP-ECG, DICOM o XML de
+GE/Philips es escribir una función y sumarla a `LECTORES`.
+
+---
+
 ## Fase 6 — Validación clínica y contrato con el resto de DECA 🔲
 
 **Tareas:**
 - Definir estrategia de validación clínica/estadística antes de considerar el modelo apto para uso real (mencionado como pendiente en el ROADMAP).
-- Definir el contrato de entrada/salida entre este módulo de IA y el Backend: formato de ECG que sube el usuario, formato de respuesta (score, indicio sí/no, nivel de confianza).
+- ~~Definir el contrato de entrada/salida entre este módulo de IA y el Backend: formato de ECG que sube el usuario, formato de respuesta (score, indicio sí/no, nivel de confianza).~~ **Hecho el 2026-09-22** — ver la sesión de esa fecha y `API.md`. La validación clínica sigue pendiente, y es lo que mantiene la fase abierta.
 
 **Dificultades:**
 - **Brecha entre métricas offline y validación clínica real.** Un buen AUC/recall en test no reemplaza una validación con profesionales de salud sobre casos reales antes de exponer la herramienta a pacientes.

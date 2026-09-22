@@ -1,0 +1,8 @@
+# Dependencias del servicio de inferencia (src/servidor.py). Van aparte de
+# requirements.txt a proposito: la maquina que entrena no necesita un stack web, y la que
+# sirve el modelo no necesita jupyter ni matplotlib. Para levantar el servicio hacen falta
+# los dos archivos (requirements.txt trae numpy/scipy/pandas/torch, que son los que hacen
+# el trabajo real).
+fastapi==0.141.1
+uvicorn==0.53.0
+python-multipart==0.0.32

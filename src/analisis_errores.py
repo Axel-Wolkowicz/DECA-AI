@@ -443,6 +443,24 @@ def imprimir_mecanismo(m: dict) -> None:
         print(f"    {s}  positivos {v['positivos']*100:5.1f}%   negativos {v['negativos']*100:5.1f}%")
 
 
+def imprimir_vocabulario(v: dict) -> None:
+    ancho = 78
+    print("\n" + "=" * ancho)
+    print("VOCABULARIO -- que tienen los perdidos, contra los 6 dx de code15/exams.csv")
+    print("=" * ancho)
+    cab = "  ".join(f"{c:>6}" for c in DX_CODE15)
+    print(f"  {'grupo':<30}{'n':>7}  {cab}   sin dx")
+    for nombre, g in v["prevalencia_por_grupo"].items():
+        celdas = "  ".join(f"{g[c]*100:5.1f}%" for c in DX_CODE15)
+        print(f"  {nombre:<30}{g['n']:>7}  {celdas}   {g['sin_ningun_dx']*100:5.1f}%")
+    print("\n  Sensibilidad de la banda alta segun el dx presente (positivos de arena A):")
+    for f in v["sensibilidad_por_dx"]:
+        print(f"    {f['dx']:<8} n={f['n']:>4}  "
+              f"{f['sensibilidad']*100:5.1f}% [{f['ic95'][0]*100:.1f}-{f['ic95'][1]*100:.1f}]")
+    print("\n  Leer asi: si el grueso de los perdidos cae en 'sin dx', el hueco NO se tapa")
+    print("  anotando mas patrones de ECG -- no esta en ninguna taxonomia que tengamos.")
+
+
 def main():
     p = argparse.ArgumentParser(description="Fase 5: analisis de falsos negativos")
     p.add_argument("--checkpoint", help="checkpoint congelado (patrones-lr8/mejor.pt)")
