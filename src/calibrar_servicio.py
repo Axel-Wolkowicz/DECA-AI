@@ -49,13 +49,12 @@ TEXTOS_BANDA = {
         "Prioridad alta. Es la banda que el modelo sostiene: sobre la medicion de test, "
         "de cada 100 personas priorizadas asi cerca de 30 resultaron positivas."
     ),
-    "media": (
-        "Prioridad intermedia. Es una banda muy ancha, pensada para no perder casos y no "
-        "para priorizar: casi no cambia la probabilidad respecto de la poblacion general."
-    ),
-    "baja": (
-        "Prioridad baja. Casi todos los que caen aca son negativos, pero la banda no "
-        "descarta Chagas: una parte de los casos reales tambien cae aca."
+    "no_alta": (
+        "Sin prioridad por ECG. El trazado no muestra lo que el modelo usa para priorizar, "
+        "pero esto NO descarta Chagas: cerca de 4 de cada 5 casos reales caen aca. Si la "
+        "persona vive o vivio en zona endemica, su madre tiene Chagas o recibio "
+        "transfusiones, la Guia nacional indica sospechar la infeccion igual, y la "
+        "serologia es gratuita."
     ),
 }
 
@@ -75,38 +74,40 @@ def predecir(modelo, meta, device, batch, workers) -> dict:
 
 
 def metricas_de_banda(a: dict, prevalencia: float, n: int) -> dict:
-    """Reconstruye la tabla de operacion de las 3 bandas a partir de lo ya reportado.
+    """Las dos bandas del servicio, a partir de lo que `evaluar_test.py` ya publico.
 
-    Es aritmetica sobre los numeros que `evaluar_test.py` ya publico (sensibilidad,
-    especificidad, VPP y fraccion derivada de cada umbral), no una medicion nueva. La banda
-    baja no la reporta ningun script porque no es un umbral de derivacion, pero su valor
-    predictivo negativo es justo lo que el medico necesita para no sobre-interpretar un
-    resultado bajo.
+    Es aritmetica sobre la fila `banda_alta` del JSON de test (sensibilidad, VPP y fraccion
+    derivada), no una medicion nueva.
+
+    **Dos resultados, no tres: `alta` y `no_alta`.** Decision de Axel del 2026-09-23: el
+    unico uso del modelo es decidir a quien se le manda a hacer la serologia, y eso lo
+    decide solo la banda alta. Hasta ese dia el servicio devolvia tambien `media` y `baja`,
+    separadas por el umbral bajo de la Fase 3 (el de sensibilidad 95%), que no derivaban a
+    nadie. No se las junto en una "baja": ese grupo es el 98,6% de la poblacion, tiene 1,5%
+    de probabilidad contra 1,9% de la poblacion general y concentra el 78% de los casos
+    reales. Llamarlo "baja" seria mentir.
+
+    Por eso `no_alta` lleva la fraccion de casos reales que caen ahi y no un VPN: un VPN de
+    98,5% suena tranquilizador, y la poblacion general ya tiene 98,1%.
     """
     pos = prevalencia * n
-    neg = n - pos
-    salida = {}
-
-    for clave, nombre in (("banda_alta", "alta"), ("banda_media", "media")):
-        b = a[clave]
-        salida[nombre] = {
-            "texto": TEXTOS_BANDA[nombre],
-            "ppv": round(float(b["ppv"]), 4),
-            "sensibilidad": round(float(b["sensibilidad"]), 4),
-            "poblacion": round(float(b["derivados"]), 4),
-        }
-
-    media = a["banda_media"]
-    tp = media["sensibilidad"] * pos
-    fn = pos - tp
-    tn = media["especificidad"] * neg
-    salida["baja"] = {
-        "texto": TEXTOS_BANDA["baja"],
-        "vpn": round(float(tn / (tn + fn)), 5) if tn + fn else None,
-        "casos_reales_perdidos": round(float(fn / pos), 4) if pos else None,
-        "poblacion": round(float(1.0 - media["derivados"]), 4),
+    alta = a["banda_alta"]
+    pob_resto = 1.0 - alta["derivados"]
+    perdidos = 1.0 - alta["sensibilidad"]
+    return {
+        "alta": {
+            "texto": TEXTOS_BANDA["alta"],
+            "ppv": round(float(alta["ppv"]), 4),
+            "sensibilidad": round(float(alta["sensibilidad"]), 4),
+            "poblacion": round(float(alta["derivados"]), 4),
+        },
+        "no_alta": {
+            "texto": TEXTOS_BANDA["no_alta"],
+            "ppv": round(float(perdidos * pos / (pob_resto * n)), 4),
+            "casos_reales_perdidos": round(float(perdidos), 4),
+            "poblacion": round(float(pob_resto), 4),
+        },
     }
-    return salida
 
 
 def _ultimo_test_json() -> Path | None:
@@ -171,14 +172,16 @@ def main():
     pac = agregar_por_paciente(meta_val, scores)
     arena_a = pac[pac["dataset"] == "code15"]
     y, s = arena_a["y"].to_numpy(), arena_a["score"].to_numpy()
-    umbrales = calibrar_umbrales(y, s)
+    # `calibrar_umbrales` devuelve tambien el umbral bajo de la Fase 3, pero el servicio ya
+    # no lo usa (ver metricas_de_banda) y no se guarda: un umbral en el archivo que nadie
+    # aplica invita a creer que define algo.
+    umbrales = {"umbral_alto": calibrar_umbrales(y, s)["umbral_alto"]}
+    congelados = {"umbral_alto": medido["umbrales_de_val"]["umbral_alto"]}
 
-    congelados = medido["umbrales_de_val"]
-    print("umbrales calibrados en val / arena A, a nivel paciente:")
-    for k in ("umbral_bajo", "umbral_alto"):
-        d = umbrales[k] - congelados[k]
-        print(f"  {k:<12} float32 {umbrales[k]:.9f}   congelado (fp16) {congelados[k]:.9f}"
-              f"   delta {d:+.2e}")
+    d = umbrales["umbral_alto"] - congelados["umbral_alto"]
+    print("umbral alto calibrado en val / arena A, a nivel paciente:")
+    print(f"  float32 {umbrales['umbral_alto']:.9f}   congelado (fp16) "
+          f"{congelados['umbral_alto']:.9f}   delta {d:+.2e}")
 
     # --- grid de percentiles -----------------------------------------------------------
     grid = np.quantile(s, np.linspace(0.0, 1.0, N_GRID))
@@ -194,9 +197,10 @@ def main():
     )
     print("\nbandas (metricas de test, arena A):")
     for nombre, b in bandas.items():
-        detalle = (f"VPP {b['ppv']*100:.1f}%  sens {b['sensibilidad']*100:.1f}%"
-                   if "ppv" in b else f"VPN {b['vpn']*100:.2f}%")
-        print(f"  {nombre:<6} {b['poblacion']*100:5.1f}% de la poblacion   {detalle}")
+        detalle = (f"sens {b['sensibilidad']*100:.1f}%" if "sensibilidad" in b
+                   else f"casos reales que caen aca {b['casos_reales_perdidos']*100:.1f}%")
+        print(f"  {nombre:<7} {b['poblacion']*100:5.1f}% de la poblacion   "
+              f"VPP {b['ppv']*100:.2f}%   {detalle}")
 
     calidad = {("brd" if k == "rbbb" else k): {
         "auc_test": round(v["auc"], 4), "auprc_test": round(v["auprc"], 4),

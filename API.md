@@ -16,9 +16,12 @@ Lo que está medido, sobre 34.772 pacientes que el modelo nunca vio (test, 14/09
 
 | Banda | % de la población | Qué significa |
 |---|---|---|
-| **alta** | 1,4 % | De cada 100 personas priorizadas así, **~30 resultaron positivas** |
-| **media** | 62,2 % | VPP 2,9 %: apenas por encima de la prevalencia general (1,9 %) |
-| **baja** | 37,8 % | VPN 99,76 %, pero **el 4,7 % de los casos reales cae acá** |
+| **alta** | 1,4 % | De cada 100 personas priorizadas así, **~30 resultaron positivas**. Es la que manda a serología |
+| **no_alta** | 98,6 % | 1,5 % de probabilidad, casi la de la población general (1,9 %). **Acá cae el 78 % de los casos reales**: no descarta nada |
+
+Son dos resultados y no más. Hasta el 23/09/2026 había también `media` y `baja`, que no
+derivaban a nadie y se sacaron: el único uso del modelo es decidir a quién se manda a
+hacerse la serología, y eso lo decide sólo la banda alta.
 
 ### El número que se muestra es un percentil, no una probabilidad
 
@@ -32,6 +35,11 @@ distribución de scores de una población de referencia (34.780 pacientes de val
 `"percentil": 98.7` se lee **"este ECG puntúa más alto que el 98,7 % de los ECG de
 referencia"**. Eso es literalmente cierto y es lo que sirve para decidir a quién se manda
 primero a serología.
+
+**Ojo con el percentil en `no_alta`: puede ser alto.** La banda alta empieza cerca del
+percentil 98,6, así que un ECG `no_alta` puede venir con percentil 92 o 97. Leído solo,
+"percentil 97" suena a urgencia. **La banda va primero y el percentil después**, nunca el
+percentil solo.
 
 **Texto sugerido para la interfaz** — el servicio ya devuelve uno en
 `analisis.interpretacion.texto`:
@@ -146,7 +154,7 @@ la fecha de calibración.
   "ok": true,
   "analisis": {
     "percentil": 98.7,          // ← esto es lo que se muestra y se guarda
-    "banda": "alta",            // "alta" | "media" | "baja"
+    "banda": "alta",            // "alta" | "no_alta"
     "score": 0.961234,          // crudo, para trazabilidad. NO mostrarlo como porcentaje
     "interpretacion": {
       "texto": "Prioridad alta. …",
@@ -276,8 +284,8 @@ en `NUMERIC(5,2)` y el `CHECK (0..100)` sigue valiendo. Pero si sólo se guarda 
 lo más importante, que es la banda:
 
 ```sql
-ALTER TABLE analisis ADD COLUMN IF NOT EXISTS banda VARCHAR(6)
-  CHECK (banda IN ('alta','media','baja'));
+ALTER TABLE analisis ADD COLUMN IF NOT EXISTS banda VARCHAR(7)
+  CHECK (banda IN ('alta','no_alta'));
 ALTER TABLE analisis ADD COLUMN IF NOT EXISTS score NUMERIC(8,6);
 ALTER TABLE analisis ADD COLUMN IF NOT EXISTS modelo_sha VARCHAR(16);
 ```
@@ -296,7 +304,10 @@ Están medidas, no son advertencias de forma.
 - **La banda alta es, operativamente, un detector de bloqueo de rama derecha.** Encuentra al
   73,3 % de los positivos que tienen BRD anotado y al 10,4 % de los que no. Un ECG sin BRD
   rara vez va a entrar en banda alta, aunque la persona esté infectada.
-- **Un resultado bajo no descarta Chagas.** El 4,7 % de los casos reales cae en banda baja.
+- **`no_alta` no descarta Chagas.** Ahí cae el 78 % de los casos reales. El texto que
+  devuelve el servicio lo dice, y remite a la Guía nacional: con antecedentes
+  epidemiológicos (zona endémica, madre con Chagas, transfusiones) la serología corresponde
+  igual.
 - **A las mujeres las encuentra menos** (18,5 % contra 27,3 % en hombres), porque tienen
   menor prevalencia de BRD, no porque el modelo las trate distinto a igual ECG.
 - **El modelo no sabe reconocer si lo que recibió es un ECG.** Se le puede dar ruido blanco

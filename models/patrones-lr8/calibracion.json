@@ -5,11 +5,9 @@
     "epoca": 6
   },
   "umbrales": {
-    "umbral_bajo": 0.016909902915358543,
     "umbral_alto": 0.9300273656845093
   },
   "umbrales_congelados_fp16": {
-    "umbral_bajo": 0.016914913430809975,
     "umbral_alto": 0.9300780892372131
   },
   "percentiles": {
@@ -10054,21 +10052,15 @@
       "sensibilidad": 0.2177,
       "poblacion": 0.0141
     },
-    "media": {
-      "texto": "Prioridad intermedia. Es una banda muy ancha, pensada para no perder casos y no para priorizar: casi no cambia la probabilidad respecto de la poblacion general.",
-      "ppv": 0.0294,
-      "sensibilidad": 0.9535,
-      "poblacion": 0.6222
-    },
-    "baja": {
-      "texto": "Prioridad baja. Casi todos los que caen aca son negativos, pero la banda no descarta Chagas: una parte de los casos reales tambien cae aca.",
-      "vpn": 0.99764,
-      "casos_reales_perdidos": 0.0465,
-      "poblacion": 0.3778
+    "no_alta": {
+      "texto": "Sin prioridad por ECG. El trazado no muestra lo que el modelo usa para priorizar, pero esto NO descarta Chagas: cerca de 4 de cada 5 casos reales caen aca. Si la persona vive o vivio en zona endemica, su madre tiene Chagas o recibio transfusiones, la Guia nacional indica sospechar la infeccion igual, y la serologia es gratuita.",
+      "ppv": 0.0152,
+      "casos_reales_perdidos": 0.7823,
+      "poblacion": 0.9859
     }
   },
   "generado": {
-    "fecha": "2026-09-22T13:51:16",
+    "fecha": "2026-09-23T15:47:36",
     "precision": "float32",
     "medicion_de_bandas": "test_20260914-114808.json (test 2026-09-14)"
   }

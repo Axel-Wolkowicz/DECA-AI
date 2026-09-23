@@ -55,8 +55,8 @@ más. **No lo expongas al frontend.**
 Agregar al final del bloque de `analisis` en `schema.sql` (antes del `DROP TABLE` final):
 
 ```sql
-ALTER TABLE analisis ADD COLUMN IF NOT EXISTS banda VARCHAR(6)
-  CHECK (banda IN ('alta', 'media', 'baja'));
+ALTER TABLE analisis ADD COLUMN IF NOT EXISTS banda VARCHAR(7)
+  CHECK (banda IN ('alta', 'no_alta'));
 ALTER TABLE analisis ADD COLUMN IF NOT EXISTS score NUMERIC(8, 6);
 ALTER TABLE analisis ADD COLUMN IF NOT EXISTS modelo_sha VARCHAR(16);
 ```
@@ -67,8 +67,10 @@ Después `npm run migrate`. Es idempotente como el resto del archivo.
 
 - **`porcentaje`** (la que ya existe) → el **percentil de riesgo**. Entra tal cual en
   `NUMERIC(5,2)` y el `CHECK (0..100)` sigue valiendo.
-- **`banda`** → `alta` / `media` / `baja`. **Es lo más importante que devuelve el modelo**;
-  si sólo guardás el percentil, perdés lo único que tiene un valor predictivo medido.
+- **`banda`** → `alta` / `no_alta`. **Es lo más importante que devuelve el modelo**: `alta`
+  es la que manda a serología. Si sólo guardás el percentil, perdés lo único que tiene un
+  valor predictivo medido. Y en pantalla la banda va antes que el percentil: un `no_alta`
+  puede tener percentil 97, y leído solo eso suena a urgencia.
 - **`score`** → la salida cruda de la red. Sólo para trazabilidad. **No se muestra nunca**
   (ver "Cosas que te van a morder", abajo).
 - **`modelo_sha`** → qué versión del modelo produjo ese análisis. Si algún día se cambia el
@@ -224,8 +226,9 @@ está. Lo más simple es un mapa constante en el backend:
 const TEXTO_BANDA = {
   alta: 'Prioridad alta. De cada 100 personas priorizadas así, cerca de 30 resultaron '
       + 'positivas en la validación del modelo.',
-  media: 'Prioridad intermedia. Apenas por encima de la prevalencia general.',
-  baja: 'Prioridad baja. Casi todos los que caen acá son negativos, pero no descarta Chagas.',
+  no_alta: 'Sin prioridad por ECG. Esto NO descarta Chagas: cerca de 4 de cada 5 casos '
+      + 'reales caen acá. Con antecedentes epidemiológicos (zona endémica, madre con '
+      + 'Chagas, transfusiones) corresponde ofrecer la serología igual.',
 };
 ```
 

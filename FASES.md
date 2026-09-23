@@ -2469,10 +2469,182 @@ GE/Philips es escribir una función y sumarla a `LECTORES`.
 
 ---
 
+## Sesión del 2026-09-23 — estrategia de validación clínica
+
+Cierra la tarea que mantenía abierta la Fase 6: definir cómo se valida el modelo en Argentina
+antes de usarlo con pacientes. El documento es [`VALIDACION-CLINICA.md`](VALIDACION-CLINICA.md).
+Acá va lo que se decidió, los números nuevos que salieron y el porqué.
+
+**Ningún número de esta sesión es una segunda medición de test.** Todo sale de
+`test_scores_20260916-152548.parquet` con los umbrales ya calibrados en val (0,0169 / 0,9301),
+por la vía que CLAUDE.md habilita para `--solo-analisis`: sin GPU, sin modelo y sin retocar nada.
+Script descartable, reproducible con `analisis_errores.tabla_pacientes` más aritmética.
+
+### Decisión 1 — la medida principal es el LR+, no el VPP
+
+El VPP depende de la prevalencia del lugar. El 29,5 % de la banda alta vale con 1,9 %; con el
+mismo modelo y 10 % de prevalencia sería 70,5 %, y con 1 % sería 17,8 %. **O sea que el texto
+que devuelve hoy el servicio ("cerca de 30 de cada 100") sólo es cierto en CODE-15%.** El LR+ es
+la propiedad del modelo que se traslada. Criterio propuesto: **IC95 inferior del LR+ ≥ 5**, el
+umbral convencional de cambio moderado (Jaeschke 1994). **Espera firma de Axel.**
+
+### Números nuevos: las bandas como cocientes de verosimilitud (arena A, paciente)
+
+| banda | población | LR [IC95] |
+|---|---|---|
+| alta | 1,41 % | **21,5** [18,0 – 25,6] |
+| media | 60,8 % | 1,21 [1,16 – 1,27] |
+| baja | 37,8 % | 0,12 [0,09 – 0,17] |
+
+Por sexo el LR+ de la banda alta es el mismo: **22,1 (mujeres) vs 21,4 (varones)**. La
+disparidad de sensibilidad del 2026-09-16 (18,5 % vs 27,3 %) viene acompañada de una diferencia
+igual de FPR (0,84 % vs 1,28 %): cuando la banda se enciende, informa lo mismo para los dos
+sexos. Se enciende menos en mujeres porque tienen menos BRD.
+
+### Número nuevo: el modelo le gana a la regla clínica "todo BRD → serología"
+
+Si la banda alta es operativamente un detector de BRD, un revisor va a preguntar por qué no
+alcanza con que un médico pida serología a todo el que tenga BRD. Medido sobre los mismos
+pacientes:
+
+| | deriva | sens. | VPP | LR+ |
+|---|---|---|---|---|
+| banda alta | 1,41 % | 21,8 % | **29,5 %** | **21,5** [18,0 – 25,6] |
+| todo BRD anotado | 2,45 % | 18,0 % | 14,1 % | 8,4 [7,0 – 10,0] |
+
+**Más casos, derivando al 58 % de la gente, con el doble de VPP.** Dentro del BRD, el modelo
+deriva al 73,3 % de los chagásicos y al 27,4 % de los no chagásicos (LR 2,7). Fuera del BRD
+deriva al 10,4 % contra 0,43 % (LR 24), y el VPP adentro y afuera del BRD es casi igual (30 %
+vs 28 %). **Esto matiza el "es un detector de BRD" del 2026-09-16**: es cierto para *cuántos*
+deriva, no para *cuán bien* deriva. Entra al protocolo como comparador obligatorio.
+
+### Número nuevo: el punto de operación se puede predecir desde la mezcla de BRD
+
+Con esas cuatro tasas por estrato, `sens ≈ 0,733·r₁ + 0,104·(1−r₁)` y `FPR ≈ 0,274·r₀ +
+0,0043·(1−r₀)`, donde r₁ y r₀ son la prevalencia de BRD entre positivos y negativos. Con los
+valores de CODE-15% (18,0 % y 2,15 %) reproduce exacto el 21,8 % y el 1,01 % de test. Sirve
+para dos cosas: predecir el LR+ local antes de sacar sangre (r₀ sale de los informes de ECG,
+sin serología) y, si el estudio falla, distinguir mezcla de casos de deriva de señal.
+
+### Decisión 2 — tres etapas, y la primera no usa serología
+
+**Etapa 0:** 1.500–2.000 ECG de archivo con su informe. Se compara la cabeza de BRD contra el
+BRD informado (criterio: IC95 inferior ≥ 0,93) y se mide la fracción en banda alta entre los
+ECG sin BRD: más de 4 % no se explica con ninguna prevalencia plausible y es la firma de una
+señal que el modelo no entiende. Es la etapa barata que evita la cara, y además da el primer
+número de la cabeza de HBAI fuera de los datos de entrenamiento (pendiente nº 5 de la
+SÍNTESIS). **Etapa 1:** exactitud diagnóstica prospectiva, modelo en modo silencioso.
+**Etapa 2:** uso real; sólo se esboza (DECIDE-AI).
+
+### Decisión 3 — verificación estratificada
+
+Serología a toda la banda alta y a un 10 % al azar del resto, con ponderación por la inversa de
+la probabilidad de selección (Begg-Greenes 1983). Los ECG ya están hechos; lo caro son las
+serologías. Simulado (4.000 repeticiones): con prevalencia de 5 %, **5.000 ECG y ~590
+serologías** dan 97 % de potencia en el escenario de degradación plausible (LR+ real 12,2),
+contra 2.000 serologías y 91 % si se testea a todos. **La prevalencia del sitio es lo que más
+mueve el costo**: es el primer dato a pedirle a un sitio candidato.
+
+### Hallazgo lateral: la banda media del servicio lleva números que no son suyos
+
+`calibracion.json` (y la tabla de `API.md`) le asignan a la banda media **VPP 2,94 %,
+sensibilidad 95,35 % y 62,22 % de la población**. Son los números de "score ≥ umbral bajo", o
+sea **media más alta**: salen de `evaluar_test.py`, que reporta el umbral bajo como una regla
+de derivación y no como una banda. Pero el servicio asigna "media" sólo entre los dos umbrales,
+y ahí los números reales son **60,8 % de la población, VPP 2,3 %, y el 73,6 % de los casos**.
+Las tres bandas del contrato suman 101,4 %. El texto que ve el médico ("casi no cambia la
+probabilidad") sigue siendo cierto, pero `sensibilidad: 0.9535` en la banda media es falso tal
+como se presenta.
+
+**Corregido en la misma sesión.** `calibrar_servicio.metricas_de_banda` ahora le resta la banda
+alta a la regla "≥ umbral bajo" (aritmética sobre el mismo JSON de test, nada nuevo medido) y
+**corta la ejecución si las tres bandas no suman el 100 % de la población**, para que esto no
+pueda volver a pasar sin que se note. Las claves no cambian: `sensibilidad` significa en las
+dos bandas que la llevan lo mismo, P(banda | positivo), así que el backend no tiene que tocar
+nada. Se regeneró `calibracion.json` corriendo el script entero (inferencia float32 sobre val),
+no a mano, y **el diff son exactamente 4 líneas**: los tres números de la banda media
+(0,0294 / 0,9535 / 0,6222 → 0,0232 / 0,7357 / 0,6081) y la fecha. Los umbrales y los 10.001
+puntos del grid de percentiles salieron idénticos, o sea que **la calibración es
+reproducible**. El servicio carga el archivo nuevo, pasa el chequeo de sha256 y devuelve para
+el ECG de ruido blanco el mismo score y percentil que el 2026-09-22 (0,615 / 92,45), ahora con
+los números correctos de banda media. `API.md` corregido.
+
+*Superado horas después por la decisión de abajo:* la banda media dejó de existir, y con ella
+el chequeo de partición (con dos bandas complementarias no tiene cómo fallar).
+
+### Decisión de Axel — el servicio pasa a dos resultados: `alta` y `no_alta`
+
+**"Sólo me interesa la banda alta para mandar a hacerse serología."** El único uso del modelo
+es decidir a quién se deriva, y eso lo decide sólo el umbral alto. Las bandas `media` y `baja`
+venían del umbral bajo de la Fase 3 (el de sensibilidad 95 %), que describía una regla de
+derivación que el producto nunca adoptó.
+
+**Por qué no quedó "alta / baja".** Sin la media, "baja" sería todo lo que no es alta, y ese
+grupo no es bajo en nada. Medido sobre el mismo parquet de test:
+
+| | población | P(\| positivo) | P(pos \| resultado) | LR |
+|---|---|---|---|---|
+| `alta` | 1,41 % | 21,8 % | 29,5 % | 21,5 [18,0 – 25,6] |
+| `no_alta` | 98,59 % | **78,2 %** | **1,52 %** | **0,79** [0,76 – 0,82] |
+
+No estar en banda alta lleva la probabilidad de 1,92 % a 1,52 %: casi nada. Ahí cae el 78 % de
+los casos reales. Llamar "baja" a eso sería exactamente la comunicación como descarte que la
+SÍNTESIS prohíbe. El nombre `no_alta` dice lo que se sabe y nada más.
+
+**Lo que se pierde, y se pierde a sabiendas:** el score sí tiene información en la cola de
+abajo (el 37,8 % más bajo tiene LR 0,12, tabla de arriba), pero el producto no la usa para
+decidir nada, y mostrarla invitaba a leerla como tranquilizadora.
+
+**Cómo quedó implementado:**
+- `inferencia.Calibracion.banda()` devuelve `alta` o `no_alta`. El umbral bajo salió del
+  servicio y de `calibracion.json`: un umbral en el archivo que nadie aplica invita a creer que
+  define algo.
+- `no_alta` lleva `ppv` (1,52 %) y `casos_reales_perdidos` (78,2 %), **no un VPN**: 98,5 % suena
+  tranquilizador y la población general ya tiene 98,1 %. Su texto dice que no descarta Chagas y
+  remite a la Guía nacional 2018 (sec. 3.2.2: residencia en zona endémica, madre infectada,
+  transfusiones → sospechar la infección igual).
+- `calibracion.json` regenerado con el script, no a mano. Contra el commit del 2026-09-22 el
+  diff sólo saca los dos `umbral_bajo`, reemplaza el bloque `bandas` y cambia la fecha: el
+  umbral alto y el grid de percentiles son idénticos.
+- Verificado por HTTP (`/contrato` y `/analizar/json`) con dos ECG reales de test: el de score
+  más alto da 0,99831 y `alta`; uno de score ~0,30 da 0,29996 (parquet 0,30003, ruido
+  fp16/fp32) y `no_alta`.
+- `API.md`, `BACKEND-TAREAS.md` (columna `banda VARCHAR(7) CHECK IN ('alta','no_alta')` y el
+  mapa de textos) y `VALIDACION-CLINICA.md` actualizados. El protocolo no cambia en lo
+  principal: la medida primaria ya era la banda alta, y la verificación "10 % del resto" es la
+  misma. El secundario "LR de media y baja" pasa a "LR− de `no_alta`".
+
+**Queda abierto un punto de producto:** el percentil. Un `no_alta` puede tener percentil 97
+(el ruido blanco da 92,45), y leído solo suena a urgencia. `API.md` pide mostrar la banda antes
+que el percentil, pero la pregunta de fondo es si el percentil sirve de algo cuando la decisión
+es binaria.
+
+### Lo que la estrategia encontró afuera del modelo
+
+- **La Ley 26.281, art. 5, prohíbe la serología de Chagas a aspirantes a un empleo**, y el
+  art. 6 hace discriminatorio usar esa información en perjuicio de la persona. El ROADMAP pone
+  como caso de uso el "ECG que ya se realiza mucha gente por trabajo". **El ECG preocupacional
+  como entrada de DECA necesita revisión legal antes de ofrecerse.** En el estudio se excluye.
+- **Guía nacional 2018:** el 70 % de los infectados está en estadio 0 de Kuschnir, con ECG
+  normal. Es un techo clínico coherente con el 20 % de sensibilidad de la banda alta: la mayoría
+  de los infectados no tiene nada que un ECG pueda mostrar.
+- **ANMAT, Disposición 64/2025:** en modo silencioso el modelo no se usa como producto médico.
+  Mostrarle el resultado a un médico (Etapa 2) probablemente sí lo sea, y hay que consultarlo
+  antes.
+
+### Qué queda
+
+Nada de código de modelo. Lo que falta para ejecutar es externo: un sitio con ECG digital y
+seroprevalencia conocida, un investigador clínico responsable, el aval de un comité de ética y
+financiamiento para 600–900 serologías. Más **la firma de Axel** sobre los criterios del
+protocolo.
+
+---
+
 ## Fase 6 — Validación clínica y contrato con el resto de DECA 🔲
 
 **Tareas:**
-- Definir estrategia de validación clínica/estadística antes de considerar el modelo apto para uso real (mencionado como pendiente en el ROADMAP).
+- ~~Definir estrategia de validación clínica/estadística antes de considerar el modelo apto para uso real (mencionado como pendiente en el ROADMAP).~~ **Estrategia definida el 2026-09-23** — ver la sesión de esa fecha y `VALIDACION-CLINICA.md`. Falta **ejecutarla**, y eso depende de un sitio clínico, un comité de ética y la firma de Axel sobre los criterios; es lo que mantiene la fase abierta.
 - ~~Definir el contrato de entrada/salida entre este módulo de IA y el Backend: formato de ECG que sube el usuario, formato de respuesta (score, indicio sí/no, nivel de confianza).~~ **Hecho el 2026-09-22** — ver la sesión de esa fecha y `API.md`. La validación clínica sigue pendiente, y es lo que mantiene la fase abierta.
 
 **Dificultades:**

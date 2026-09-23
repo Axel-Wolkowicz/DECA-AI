@@ -99,7 +99,6 @@ def sha256_de(path: Path) -> str:
 class Calibracion:
     """Todo lo que fija el punto de operacion. Sale de `calibrar_servicio.py`."""
 
-    umbral_bajo: float
     umbral_alto: float
     grid_percentiles: np.ndarray       # scores de referencia, ordenados ascendente
     poblacion_referencia: str
@@ -115,7 +114,6 @@ class Calibracion:
         datos = json.loads(Path(path).read_text(encoding="utf-8"))
         p = datos["percentiles"]
         return cls(
-            umbral_bajo=float(datos["umbrales"]["umbral_bajo"]),
             umbral_alto=float(datos["umbrales"]["umbral_alto"]),
             grid_percentiles=np.asarray(p["grid"], dtype=np.float64),
             poblacion_referencia=p["poblacion"],
@@ -140,9 +138,9 @@ class Calibracion:
         return float(np.searchsorted(g, float(score), side="right") / len(g) * 100.0)
 
     def banda(self, score: float) -> str:
-        if score >= self.umbral_alto:
-            return "alta"
-        return "media" if score >= self.umbral_bajo else "baja"
+        """`alta` o `no_alta`: el unico corte que decide una derivacion (ver
+        calibrar_servicio.metricas_de_banda, decision del 2026-09-23)."""
+        return "alta" if score >= self.umbral_alto else "no_alta"
 
 
 class MotorDECA:
@@ -336,8 +334,7 @@ if __name__ == "__main__":
     print(f"  checkpoint {motor.checkpoint_path.name} sha256 {motor.sha256[:16]} epoca {motor.epoca}")
     print(f"  referencia {motor.calibracion.poblacion_referencia} "
           f"(n={motor.calibracion.n_referencia:,})")
-    print(f"  umbrales   bajo {motor.calibracion.umbral_bajo:.6f}  "
-          f"alto {motor.calibracion.umbral_alto:.6f}\n")
+    print(f"  umbral de la banda alta {motor.calibracion.umbral_alto:.6f}\n")
 
     if args.archivo:
         deriv = args.derivaciones.split(",") if args.derivaciones else None
