@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+import plausibilidad
 from lectura_ecg import DERIVACIONES_CANONICAS, ECGInvalido, LecturaECG, leer_ecg
 from model import ResNet1D
 from ventana import OUT_FREQ, WINDOW_SEC, procesar_registro
@@ -79,6 +80,25 @@ CODIGOS = {
     "senal_corrupta": "El ECG contiene valores no finitos (NaN o infinito).",
     "senal_larga": f"El registro dura mas de {MAX_DURACION_S:.0f} s; no es un ECG de reposo.",
     "senal_plana": "Demasiadas derivaciones sin señal (electrodos desconectados).",
+    "no_parece_ecg": "La señal no tiene la estructura de un electrocardiograma.",
+    "derivaciones_permutadas": "Los nombres de las derivaciones de miembros no corresponden a su contenido.",
+}
+
+# Mensajes completos de los rechazos de `plausibilidad.py`. Van aparte de CODIGOS porque
+# son los que ve el medico y tienen que decir que hacer, no solo que paso.
+_MOTIVOS_PLAUSIBILIDAD = {
+    "no_parece_ecg": (
+        "La señal recibida no tiene la estructura de un electrocardiograma: no aparecen "
+        "complejos QRS. Suele ser un archivo equivocado, una columna que no es señal o un "
+        "registro hecho sin electrodos conectados. El modelo puntuaria cualquier cosa que "
+        "reciba, asi que no se analiza."
+    ),
+    "derivaciones_permutadas": (
+        "Las derivaciones de miembros (I, II, III, aVR, aVL, aVF) no son coherentes con los "
+        "nombres que traen: la señal esta bien pero hay columnas intercambiadas, por ejemplo "
+        "aVR con aVL. Suele ser un problema de la exportacion del equipo. Analizarlo asi "
+        "daria un resultado sobre un ECG que no es el del paciente."
+    ),
 }
 
 ADVERTENCIA = (
@@ -230,6 +250,17 @@ class MotorDECA:
                 "esas dos esta plana, asi que las reconstruidas tampoco son confiables."
             )
 
+        # Despues de los controles de la Fase 2 y de derivaciones planas: esos ya dicen que
+        # esta mal con mas precision cuando aplican. Un ECG que pasa no cambia de score.
+        plaus = plausibilidad.evaluar(lectura.señal, ventana, lectura.derivadas, planas)
+        if plaus["rechazos"]:
+            codigo = plaus["rechazos"][0]
+            raise ECGInvalido(
+                codigo, _MOTIVOS_PLAUSIBILIDAD[codigo],
+                f"concentracion_qrs={plaus['concentracion_qrs']} "
+                f"coherencia_miembros={plaus['coherencia_miembros']}",
+            )
+
         calidad = {
             "duracion_recibida_s": round(lectura.duracion_s, 2),
             "frecuencia_recibida_hz": lectura.frecuencia,
@@ -239,6 +270,8 @@ class MotorDECA:
             "derivaciones_recibidas": lectura.derivaciones_origen,
             "derivaciones_reconstruidas": lectura.derivadas,
             "derivaciones_planas": planas,
+            "concentracion_qrs": plaus["concentracion_qrs"],
+            "coherencia_miembros": plaus["coherencia_miembros"],
             "columnas_ignoradas": lectura.ignoradas,
             "avisos": avisos,
         }
@@ -270,6 +303,10 @@ class MotorDECA:
         patrones = {"brd": self._patron("brd", p_rbbb)}
         for nombre, p in zip(cal.patrones, p_patrones):
             patrones[nombre] = self._patron(nombre, float(p))
+        # Las cabezas que no miden nada no salen del servicio (hoy: `zona`, AUPRC 0,046 en
+        # test y AUC 0,52 en chagasicos; SINTESIS, pendiente 3). Marcarlas `usable: false`
+        # dejaba en manos de cada cliente no mostrarlas; no devolverlas no deja esa opcion.
+        patrones = {k: v for k, v in patrones.items() if v.get("usable", True)}
 
         return {
             "percentil": round(percentil, 2),
@@ -293,8 +330,9 @@ class MotorDECA:
     def _patron(self, nombre: str, score: float) -> dict:
         """Score de una cabeza auxiliar, siempre acompañado de lo bien que mide.
 
-        Van con su AUPRC de test al lado a proposito: `zona` mide 0,046 y es, en la
-        practica, ruido. Devolverlo pelado invitaria a leerlo como un hallazgo.
+        Van con su AUPRC de test al lado a proposito: un score de patron sin lo bien que
+        mide invita a leerlo como un hallazgo. Las que no son usables ni siquiera salen
+        (ver `analizar`).
         """
         calidad = self.calibracion.calidad_cabezas.get(nombre, {})
         return {"score": round(float(score), 4), **calidad}
@@ -353,6 +391,10 @@ if __name__ == "__main__":
             frecuencia=500, formato="sintetico",
             derivaciones_origen=list(DERIVACIONES_CANONICAS),
         )
-        res = motor.analizar(ruido)
         print("ECG sintetico (ruido blanco, no es un ECG real):")
-        print(f"  score {res['score']}  percentil {res['percentil']}  banda {res['banda']}")
+        try:
+            res = motor.analizar(ruido)
+            print(f"  NO RECHAZADO: score {res['score']}  percentil {res['percentil']}  "
+                  f"banda {res['banda']}")
+        except ECGInvalido as e:
+            print(f"  rechazado, como corresponde [{e.codigo}] {e.detalle}")

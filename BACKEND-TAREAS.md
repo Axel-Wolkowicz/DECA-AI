@@ -13,6 +13,52 @@ hay que tocar.
 
 ---
 
+## Revisión del 28/09 — cómo quedó `b847950`
+
+Revisé DECA-Back en `cda0f2f` y corrí `npm test` (235/235 pasan). Casi todo está bien, pero
+hay **un bug que rompe el caso más común**.
+
+### ❌ Hay que arreglarlo: la columna `banda` rechaza `no_alta`
+
+Implementaron una versión anterior de este documento, que tenía tres bandas
+(`alta`/`media`/`baja`). El 23/09 el modelo pasó a **dos**: `alta` y `no_alta`. En
+`schema.sql` quedó:
+
+```sql
+ALTER TABLE analisis ADD COLUMN IF NOT EXISTS banda VARCHAR(6)
+  CHECK (banda IN ('alta', 'media', 'baja'));
+```
+
+`'no_alta'` tiene 7 caracteres y no está en el `CHECK`, así que Postgres rechaza el INSERT y
+el controller devuelve 500. **Le pasa a ~98,6 % de los ECG**, porque casi todos caen en
+`no_alta`. El ECG se analiza bien, pero el resultado no se guarda y el médico ve un error.
+Los tests no lo detectan porque todos los mocks usan `banda: 'alta'`.
+
+**Arreglo**: el SQL corregido está en la [sección 2](#2-migración), y el test que falta en la
+[sección 7](#7-tests-que-se-rompen). Cambiar sólo el `ADD COLUMN` no alcanza: si ya corrieron
+`npm run migrate`, el `IF NOT EXISTS` deja la columna vieja como está.
+
+### ⚠️ Falta: el texto de la banda en los `GET`
+
+No está el mapa `TEXTO_BANDA` ([sección 5](#el-texto-de-la-banda-en-los-get)). Sin él,
+`GET /analisis` devuelve `banda: 'no_alta'` sin la aclaración de que **eso no descarta
+Chagas**, que es lo más importante que tiene que ver el médico. Ojo: la versión vieja de
+este documento tenía el mapa con tres entradas; usen el de ahora, que tiene dos.
+
+### ✅ Está bien, no tocar
+
+`.env.example` y `env.js`, `inferenciaService.js`, `analisisService.crear` con los 5 campos,
+el controller (400 / 403 / 422 / 503 / 404 bien separados, `estaAsignado` conservado),
+`multer` con `memoryStorage` y el handler de 413 en `server.js`, los tests de 422 y 503.
+
+### ⏳ Pendiente, no depende de ustedes
+
+El servicio de inferencia todavía no tiene URL pública. Hasta que la tenga,
+`DECA_INFERENCIA_URL` en Vercel no apunta a nada y todo `POST /analisis` devuelve 503. Para
+probar localmente, ver la [sección 10](#10-cómo-probarlo).
+
+---
+
 ## Los 6 cambios
 
 | # | Archivo | Qué |
@@ -62,6 +108,22 @@ ALTER TABLE analisis ADD COLUMN IF NOT EXISTS modelo_sha VARCHAR(16);
 ```
 
 Después `npm run migrate`. Es idempotente como el resto del archivo.
+
+**Si ya migraron con la versión de tres bandas** (`VARCHAR(6)`, `'alta','media','baja'`), el
+`ADD COLUMN IF NOT EXISTS` de arriba no hace nada porque la columna ya existe. Agreguen esto
+justo debajo, también en `schema.sql`, para que corrija la base ya creada. Es idempotente:
+
+```sql
+ALTER TABLE analisis DROP CONSTRAINT IF EXISTS analisis_banda_check;
+ALTER TABLE analisis ALTER COLUMN banda TYPE VARCHAR(7);
+ALTER TABLE analisis ADD CONSTRAINT analisis_banda_check
+  CHECK (banda IN ('alta', 'no_alta'));
+```
+
+`analisis_banda_check` es el nombre que Postgres le pone solo a ese `CHECK`. Si el
+`ADD CONSTRAINT` falla porque ya existe con otro nombre, búsquenlo con
+`\d analisis` en `psql`. Si hay filas de prueba con `media` o `baja`, el `ADD CONSTRAINT`
+falla: bórrenlas antes (son de prueba, el modelo nunca devolvió esos valores).
 
 **Qué va en cada columna:**
 
@@ -290,6 +352,13 @@ Los tres archivos de `analisis`. Van con nombre para que no haya que cazarlos.
 | `devuelve 500 ante un error inesperado` | Ídem |
 | — | **Nuevo**: 422 cuando el servicio rechaza el ECG |
 | — | **Nuevo**: 503 cuando el servicio no responde |
+| — | **Nuevo**: 201 con `banda: 'no_alta'` (el caso más común; ver abajo) |
+
+**Que al menos un test use `no_alta`.** Si todos los mocks devuelven `alta`, nunca se
+prueba el caso que le pasa a casi todos los pacientes. El test del controller no alcanza
+para detectar el problema de la columna, porque mockea la base. Lo que sí lo detecta es
+probar contra una base real: `POST /analisis` con el servicio de inferencia corriendo
+localmente (sección 10) y un ECG cualquiera, que casi seguro cae en `no_alta`.
 
 El `req` de los tests de `realizar` pasa a tener esta forma:
 

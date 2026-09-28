@@ -167,14 +167,15 @@ la fecha de calibración.
     "patrones": {               // hallazgos ECG, como explicación del score
       "brd":   { "score": 0.94, "auprc_test": 0.8024, "usable": true },
       "hbai":  { "score": 0.11, "auprc_test": 0.4029, "usable": true },
-      "extra": { "score": 0.03, "auprc_test": 0.6411, "usable": true },
-      "zona":  { "score": 0.20, "auprc_test": 0.0458, "usable": false }
+      "extra": { "score": 0.03, "auprc_test": 0.6411, "usable": true }
     },
     "calidad": {                // qué llegó y qué se analizó
       "duracion_recibida_s": 10.0,
       "ventana_analizada_s": 7.0,
       "derivaciones_reconstruidas": [],
       "derivaciones_planas": [],
+      "concentracion_qrs": 0.91,      // control de "esto es un ECG" (sección 6)
+      "coherencia_miembros": { "r2": 1.0, "coseno": 1.0 },   // null si se reconstruyeron
       "avisos": []
     },
     "modelo": { "checkpoint": "patrones-lr8/mejor.pt", "sha256": "b0e2ecfc838e169c" }
@@ -182,8 +183,9 @@ la fecha de calibración.
 }
 ```
 
-**`patrones` viene con su calidad al lado a propósito.** `zona` mide AUPRC 0,046, o sea
-ruido, y por eso trae `"usable": false` — **no mostrarlo**. `brd` (bloqueo de rama derecha)
+**`patrones` viene con su calidad al lado a propósito.** Sólo salen las cabezas usables:
+`zona` (AUPRC 0,046 en test, AUC 0,52 en chagásicos) se devolvía marcada `"usable": false`
+y desde el 2026-09-28 directamente no se devuelve. `brd` (bloqueo de rama derecha)
 mide 0,80 y es el hallazgo sólido. Mostrar un score de patrón sin su calidad invita a
 leerlo como un hallazgo clínico, que es justo lo que no es.
 
@@ -257,7 +259,7 @@ Todos vienen con el mismo sobre `{ ok, error }` que ya usa el backend:
 | 503 | El modelo todavía no cargó | Reintentar |
 
 `error.codigo` es estable y está pensado para que el backend arme su propio mensaje sin
-parsear texto. Los 16 códigos salen de `GET /contrato`. Los que más van a aparecer:
+parsear texto. Los 18 códigos salen de `GET /contrato`. Los que más van a aparecer:
 
 - `senal_corta` — menos de 7,0 s de señal útil. No se rellena con ceros: eso cambiaría la
   señal que ve la red.
@@ -266,6 +268,14 @@ parsear texto. Los 16 códigos salen de `GET /contrato`. Los que más van a apar
 - `derivaciones_faltantes` — faltan precordiales, que no se pueden reconstruir.
 - `senal_corrupta` — hay NaN o infinitos en el archivo.
 - `senal_plana` — 7 o más derivaciones sin señal (electrodos desconectados).
+- `no_parece_ecg` — la señal no tiene complejos QRS: ruido, un archivo equivocado, una
+  columna que no es señal. Se mide cuánto de la energía de 5–30 Hz está concentrada en el
+  tiempo (en un ECG, en los QRS; en ruido, repartida pareja). Los ECG con marcapasos pasan.
+- `derivaciones_permutadas` — las derivaciones de miembros están bien adquiridas pero mal
+  nombradas (por ejemplo aVR y aVL cambiadas): cumplen las identidades de Einthoven y
+  Goldberger con los signos equivocados. Casi siempre es la exportación del equipo, y si
+  aparece en un archivo va a aparecer en todos los de ese equipo. Sólo se chequea cuando
+  llegan las 6 de miembros; entre precordiales no hay forma de detectarlo.
 
 ---
 
@@ -310,10 +320,13 @@ Están medidas, no son advertencias de forma.
   igual.
 - **A las mujeres las encuentra menos** (18,5 % contra 27,3 % en hombres), porque tienen
   menor prevalencia de BRD, no porque el modelo las trate distinto a igual ECG.
-- **El modelo no sabe reconocer si lo que recibió es un ECG.** Se le puede dar ruido blanco
-  y devuelve un score alto con total confianza (medido: 0,615, percentil 92). Los controles
-  de calidad atajan señal corta, corrupta o plana, pero **no** "esto no es un
-  electrocardiograma". El archivo que llega tiene que venir de un equipo real.
+- **El modelo no sabe reconocer si lo que recibió es un ECG; el servicio sí, en parte.** La
+  red puntúa cualquier cosa (a ruido blanco le daba 0,615, percentil 92). Desde el
+  2026-09-28 el servicio rechaza lo que no tiene complejos QRS (`no_parece_ecg`) y las
+  derivaciones de miembros mal nombradas (`derivaciones_permutadas`). Lo que **sigue sin
+  detectarse**: señales periódicas que imitan un ECG sin serlo, precordiales permutadas
+  entre sí, e inversión de electrodos de brazos. El archivo tiene que venir de un equipo
+  real igual.
 - **La población de referencia del percentil es brasileña** (CODE-15%, Minas Gerais). Es la
   más parecida que existe con etiqueta, pero no es argentina.
 
