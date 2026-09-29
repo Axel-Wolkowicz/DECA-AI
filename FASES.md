@@ -2047,8 +2047,9 @@ LVSD y REDS-II, o sea ecocardiograma.
    con el que se escribió la propuesta — o sea que **NO supera claramente el piso de 40,2%**
    que la propia propuesta fijaba para "solo priorizador". Lo que sí está validado es la
    banda alta.
-3. **Sacar `zona` del producto** o rehacer su etiquetado: 0,6826 en test, 0,5218 en
-   chagásicos. No es mostrable a un clínico.
+3. ~~**Sacar `zona` del producto**~~ — ✅ **hecho el 2026-09-28**: el servicio ya no la
+   devuelve (sesión del 2026-09-28/29). La cabeza sigue en el checkpoint: 0,6826 en test,
+   0,5218 en chagásicos.
 4. ~~**Análisis de falsos negativos**~~ — ✅ **hecho el 2026-09-16**, sesión propia al final de
    este documento. Dos cosas que hay que saber antes de seguir: la banda alta es
    operativamente **un detector de BRD** (73,3% de sensibilidad con BRD anotado, 10,4% sin él),
@@ -2638,6 +2639,116 @@ Nada de código de modelo. Lo que falta para ejecutar es externo: un sitio con E
 seroprevalencia conocida, un investigador clínico responsable, el aval de un comité de ética y
 financiamiento para 600–900 serologías. Más **la firma de Axel** sobre los criterios del
 protocolo.
+
+---
+
+## Sesión del 2026-09-28/29 — controles de plausibilidad: ¿lo que llegó es un ECG?
+
+Responde al hallazgo del 2026-09-22: al servicio se le daba ruido blanco y devolvía score 0,615,
+percentil 92. El código se escribió el 28/09 (`src/plausibilidad.py`, integrado en
+`inferencia.MotorDECA._preparar`, commit `49bef86`); **la medición sobre val completo se hizo el
+29/09** y cambió dos cosas que el código daba por sentadas (ver abajo). En el mismo commit salió
+`zona` del servicio: pendiente 3 de la SÍNTESIS, resuelto.
+
+**Ningún número de esta sesión toca test.** Todo es validación, por el mismo camino de código
+que usa el servicio (`MotorDECA._preparar` sobre la señal cruda del corpus). Script:
+`python src/validar_plausibilidad.py --salida <parquet>`, 312 s en CPU sobre las 4 fuentes. La
+medida de cada registro quedó en `modelos/plausibilidad_val_20260929.parquet`.
+
+### Los dos controles
+
+Deterministas, sobre la señal, sin tocar el modelo: **un ECG que los pasa se puntúa exactamente
+igual que antes**, así que la calibración y los números de test siguen valiendo.
+
+1. **`no_parece_ecg` — concentración temporal de la energía QRS.** Qué fracción de la energía
+   5–30 Hz cae en el 15 % de instantes más energéticos. En un ECG está amontonada en los QRS
+   (~0,91 de mediana); en ruido, repartida pareja (≤ 0,33). Umbral 0,30. **Se descartó el
+   criterio espectral** ("cuánta energía hay sobre 40 Hz") porque rechazaba ECG con marcapasos:
+   las espigas de estimulación tienen tanta alta frecuencia como el ruido, y en Chagas el
+   marcapasos es frecuente (4 % en SaMi-Trop).
+2. **`derivaciones_permutadas` — coherencia de las derivaciones de miembros.** De las 6 sólo 2
+   son independientes (Einthoven/Goldberger). Si III, aVR, aVL y aVF se explican casi exacto
+   desde I y II (R² ≥ 0,95) **pero con coeficientes en la dirección equivocada** (coseno < 0,90),
+   las columnas están bien adquiridas y mal nombradas: la trampa de SaMi-Trop LVSD, que
+   `lectura_ecg.py` no puede ver porque confía en los nombres. **Que las identidades no cierren
+   no se rechaza**, a propósito: pasa en ~1,4 % de val (888 de 64.190 medidos, R² < 0,95),
+   el modelo se entrenó con esos registros adentro.
+
+### Falso rechazo sobre ECG reales (val completo, 64.247 registros)
+
+| fuente | n | rechazados | tasa |
+|---|---|---|---|
+| CODE-15% | 51.371 | 40 | 0,078 % |
+| Challenge 2021 | 9.401 | 8 | 0,085 % |
+| PTB-XL | 3.245 | 0 | 0 % |
+| SaMi-Trop | 230 | 0 | 0 % |
+| **total** | **64.247** | **48** | **0,075 %** |
+
+Por motivo: 37 `derivaciones_permutadas`, 10 `no_parece_ecg`, 1 `senal_plana` (control
+anterior). Ningún Chagas+ entre los 40 rechazados con etiqueta, pero con 2,25 % de prevalencia
+en val se esperaba menos de uno: **no dice nada** sobre si el control se come positivos.
+
+**Pero la mayoría de esos 48 no son falsos rechazos.** Se miró qué son:
+
+- **26 son un error real de CODE-15%**, todos en `exams_part2.hdf5` (0,9 % de los 2.945 de esa
+  parte en val). Sus derivaciones de miembros son combinaciones de I y II con coeficientes
+  **exactos e idénticos en los 26**: III = −I + 0,5·II, aVR = 0,5·I − II, aVL = 0,5·I + 0,5·II.
+  Ninguna derivación medida da coeficientes así de redondos: son columnas calculadas con la
+  fórmula equivocada en la exportación de origen. El control los ataja bien. El modelo se
+  entrenó con registros así (la misma parte tiene su porción de train) y no se corrige: el
+  corpus y el checkpoint están congelados.
+- **7 son de Challenge 2021, todos de CPSC 2018** (China). Uno con coseno −1,000 (una columna
+  invertida de signo). No se inspeccionaron uno por uno.
+- **4 de CODE-15% sueltos** (partes 4, 8, 11, 14), con coeficientes que no son una permutación
+  limpia. Sin inspeccionar.
+- **9 `no_parece_ecg` de CODE-15%**: de 3 graficados, los 3 son ruido o señal entrecortada sin
+  un QRS reconocible. Rechazo correcto. Los otros 6 no se miraron.
+- **1 falso rechazo real, y es el peor tipo:** `challenge2021 ningbo/JS45373` es un ECG legítimo
+  con una **taquicardia de complejos anchos, ~200 lpm** (contado sobre el trazado). A esa
+  frecuencia los QRS ocupan casi todo el registro, la energía queda repartida pareja, y el
+  control la confunde con ruido (0,297 contra umbral 0,30). El médico recibiría "no parece un
+  ECG, suele ser un archivo equivocado", que es falso para el paciente que más urgencia tiene.
+
+### Lo que el código daba por sentado y val completo desmiente
+
+- **"El umbral está debajo del mínimo real" era cierto sobre la submuestra con que se fijó**
+  (10.475 registros, mínimo 0,34), **no sobre val completo**: el mínimo aceptado de CODE-15% es
+  0,300, justo en el umbral, y 10 reales quedan debajo. Cuantil 0,1 % de los aceptados por
+  fuente: 0,40–0,58. El margen es fino en la cola, y la cola incluye taquicardias.
+- **El control de "esto es un ECG" no ataja señales periódicas.** De 300 senos, se rechazaron
+  los 300, pero **159 por `derivaciones_permutadas`**: pasaban el control de QRS y cayeron por
+  casualidad en el de miembros (12 columnas del mismo seno no cumplen las identidades con los
+  signos correctos). Sólo el 47 % lo ataja el control que debería. Lo que `API.md` ya declaraba
+  como no detectado ("señales periódicas que imitan un ECG") es literal.
+
+### Detección sobre casos sintéticos (300 de cada uno)
+
+| caso | rechazado | por |
+|---|---|---|
+| ruido blanco / rosa / random walk (12 deriv.) | 100 % | `no_parece_ecg` |
+| ídem con miembros reconstruidas (8 deriv.) | 100 % / 100 % / **94,3 %** | `no_parece_ecg` |
+| senos | 100 % | 53 % miembros, 47 % QRS |
+| ECG real, aVR ↔ aVL | 99,0 % | `derivaciones_permutadas` |
+| ECG real, I ↔ II | 99,0 % | `derivaciones_permutadas` |
+| ECG real, permutación aleatoria de miembros | 97,7 % | `derivaciones_permutadas` |
+| ECG real, permutación de precordiales | **0 %** | indetectable por diseño |
+
+### Decisión de Axel — la taquicardia se sigue rechazando, con otro mensaje
+
+Había tres salidas: (1) dejarlo y declararlo en `API.md`; (2) cambiar sólo el texto de
+`no_parece_ecg`; (3) rehacer la medida para que no dependa de la frecuencia cardíaca (p. ej.
+concentración por latido). **Se eligió la 2.** DECA no analiza arritmias, así que rechazar ese
+ECG está bien; lo que estaba mal era decirle al médico que "suele ser un archivo equivocado",
+que invita a tratarlo como un error técnico justo cuando el trazado puede ser una taquicardia
+ventricular. Ahora el mensaje dice que no se encontraron QRS reconocibles, nombra las dos
+causas (archivo/electrodos, o ritmo rápido de complejos anchos) y pide revisar el trazado.
+**Qué se rechaza no cambió**: mismo umbral, mismos números de arriba. El código sigue siendo
+`no_parece_ecg` para no romper el contrato con DECA-Back. La 3 queda como mejora posible si
+en datos reales aparecen más casos así.
+
+**Hecho además en la sesión:** `validar_plausibilidad.py` fallaba con `--limit` < 200 por
+pedir 200 ECG de base a una muestra más chica; ahora toma los que haya. El comentario del
+umbral en `plausibilidad.py` se actualizó con los números de val completo.
 
 ---
 

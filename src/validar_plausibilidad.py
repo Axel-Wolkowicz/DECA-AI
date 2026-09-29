@@ -131,7 +131,8 @@ def main():
 
     print("\n=== 2. Deteccion sobre casos sinteticos ===")
     rng = np.random.default_rng(0)
-    base = val[val.dataset == "code15"].sample(200, random_state=1)
+    code15 = val[val.dataset == "code15"]
+    base = code15.sample(min(len(code15), 200), random_state=1)
     ecgs = []
     for row, s in zip(base.itertuples(index=False), cargar_senales_lote(base)):
         s = np.asarray(s, dtype=np.float32)

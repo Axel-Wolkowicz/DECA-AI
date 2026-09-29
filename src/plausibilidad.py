@@ -9,7 +9,7 @@ corta, corrupta o plana, pero nada de eso distingue un ECG de ruido.
 Son dos controles deterministas sobre la señal, sin tocar el modelo. **Un ECG que los pasa
 se puntua exactamente igual que antes**, asi que la calibracion y los numeros de test
 siguen aplicando tal cual. Umbrales fijados y medidos sobre validacion (nunca test) con
-`validar_plausibilidad.py`; el porque de cada uno esta en FASES.md, sesion del 2026-09-28.
+`validar_plausibilidad.py`; el porque de cada uno esta en FASES.md, sesion del 2026-09-28/29.
 
 1. **Concentracion temporal de la energia QRS** (`no_parece_ecg`). En un ECG la energia de
    5-30 Hz esta amontonada en los complejos QRS (y en las espigas de marcapasos); en el
@@ -42,10 +42,11 @@ from scipy.signal import butter, sosfiltfilt
 from ventana import OUT_FREQ, recortar_padding
 
 # --- control 1 -----------------------------------------------------------------------
-# Medido sobre validacion (2026-09-28): los ECG reales dan mediana 0,91 y minimo 0,34 en
-# 10.475 registros de las 4 fuentes; ruido blanco, rosa y random walk dan <= 0,33 (con 12
-# derivaciones independientes o con 8 y las de miembros reconstruidas). El umbral se pone
-# debajo del minimo real: rechazar un ECG verdadero es peor que dejar pasar ruido raro.
+# Fijado sobre una submuestra de validacion (2026-09-28: 10.475 registros, minimo real 0,34)
+# y medido despues sobre val completo (2026-09-29, 64.247): mediana 0,91, pero 10 reales
+# quedan debajo. De los mirados, casi todos son ruido del corpus; uno es una taquicardia de
+# complejos anchos a ~200 lpm, donde los QRS llenan el registro y la energia se reparte
+# pareja. Ruido blanco, rosa y random walk dan <= 0,33. Detalle en FASES.md, 2026-09-28/29.
 UMBRAL_CONCENTRACION = 0.30
 _FRACCION_PICO = 0.15
 _SUAVIZADO_S = 0.04

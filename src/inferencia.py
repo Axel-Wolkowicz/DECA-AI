@@ -80,18 +80,22 @@ CODIGOS = {
     "senal_corrupta": "El ECG contiene valores no finitos (NaN o infinito).",
     "senal_larga": f"El registro dura mas de {MAX_DURACION_S:.0f} s; no es un ECG de reposo.",
     "senal_plana": "Demasiadas derivaciones sin señal (electrodos desconectados).",
-    "no_parece_ecg": "La señal no tiene la estructura de un electrocardiograma.",
+    "no_parece_ecg": "No se encontraron complejos QRS reconocibles; revisar el trazado.",
     "derivaciones_permutadas": "Los nombres de las derivaciones de miembros no corresponden a su contenido.",
 }
 
 # Mensajes completos de los rechazos de `plausibilidad.py`. Van aparte de CODIGOS porque
 # son los que ve el medico y tienen que decir que hacer, no solo que paso.
 _MOTIVOS_PLAUSIBILIDAD = {
+    # No afirma "archivo equivocado": el unico ECG real que rechaza en val completo es una
+    # taquicardia de complejos anchos a ~200 lpm (FASES.md, 2026-09-28/29), y ese paciente
+    # es el que menos puede quedar descartado como error tecnico.
     "no_parece_ecg": (
-        "La señal recibida no tiene la estructura de un electrocardiograma: no aparecen "
-        "complejos QRS. Suele ser un archivo equivocado, una columna que no es señal o un "
-        "registro hecho sin electrodos conectados. El modelo puntuaria cualquier cosa que "
-        "reciba, asi que no se analiza."
+        "No se encontraron complejos QRS reconocibles, asi que el ECG no se analiza. Revise "
+        "el trazado antes de volver a subirlo: puede ser un problema del archivo o de los "
+        "electrodos (ruido, una columna que no es señal), pero tambien un ritmo muy rapido "
+        "con complejos anchos, donde los latidos quedan pegados y no se distinguen. Esto "
+        "ultimo requiere evaluacion clinica y no se resuelve subiendo el archivo de nuevo."
     ),
     "derivaciones_permutadas": (
         "Las derivaciones de miembros (I, II, III, aVR, aVL, aVF) no son coherentes con los "

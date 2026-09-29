@@ -271,6 +271,11 @@ parsear texto. Los 18 códigos salen de `GET /contrato`. Los que más van a apar
 - `no_parece_ecg` — la señal no tiene complejos QRS: ruido, un archivo equivocado, una
   columna que no es señal. Se mide cuánto de la energía de 5–30 Hz está concentrada en el
   tiempo (en un ECG, en los QRS; en ruido, repartida pareja). Los ECG con marcapasos pasan.
+  **Un ECG real también puede caer acá:** una taquicardia de complejos anchos muy rápida
+  (medido: una a ~200 lpm, 1 en 64.247 ECG de validación), porque los latidos quedan pegados
+  y la energía se reparte pareja. Por eso el mensaje pide revisar el trazado y no afirma que
+  el archivo esté mal. **No lo presenten como "error al subir el archivo"**: que el médico lo
+  lea como un problema técnico es justo lo que hay que evitar.
 - `derivaciones_permutadas` — las derivaciones de miembros están bien adquiridas pero mal
   nombradas (por ejemplo aVR y aVL cambiadas): cumplen las identidades de Einthoven y
   Goldberger con los signos equivocados. Casi siempre es la exportación del equipo, y si
