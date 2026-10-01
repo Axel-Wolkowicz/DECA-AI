@@ -1,0 +1,10 @@
+# El Dockerfile copia archivos puntuales; esto solo achica el contexto que se sube al build.
+.git
+.env
+.venv
+venv
+notebooks
+scripts
+**/__pycache__
+*.md
+!requirements*.txt

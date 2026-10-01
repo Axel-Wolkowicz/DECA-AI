@@ -1,0 +1,23 @@
+{
+  "sha256": "b0e2ecfc838e169c",
+  "casos": {
+    "code15_2533029.json": {
+      "score": 0.962332,
+      "percentil": 99.29,
+      "banda": "alta"
+    },
+    "samitrop_247276.json": {
+      "score": 0.97267,
+      "percentil": 99.56,
+      "banda": "alta"
+    },
+    "code15_2881181.json": {
+      "score": 0.001161,
+      "percentil": 19.92,
+      "banda": "no_alta"
+    },
+    "code15_1398291.json": {
+      "error": "derivaciones_permutadas"
+    }
+  }
+}

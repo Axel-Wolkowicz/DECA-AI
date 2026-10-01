@@ -13,6 +13,62 @@ hay que tocar.
 
 ---
 
+## Revisión del 01/10 — cómo quedó `d8225c5`
+
+Revisé los 5 commits posteriores a la revisión anterior. **Los dos pendientes del 28/09 siguen
+igual** (detalle abajo, en esa revisión), y apareció un problema nuevo con el simulador.
+
+### ❌ Sigue igual: la columna `banda` rechaza `no_alta`
+
+`schema.sql` todavía tiene `VARCHAR(6) CHECK (banda IN ('alta', 'media', 'baja'))`. Ahora
+importa más que antes: **el servicio de inferencia ya tiene imagen Docker** (`Dockerfile` en
+este repo) y se va a publicar, y en cuanto `DECA_INFERENCIA_URL` apunte a algo, ~98,5 % de los
+`POST /analisis` van a dar 500. El arreglo está en la [sección 2](#2-migración).
+
+### ⚠️ Sigue faltando: el texto de la banda en los `GET`
+
+Sin cambios respecto del 28/09: no está `TEXTO_BANDA` ([sección 5](#el-texto-de-la-banda-en-los-get)).
+
+### ❌ Nuevo: sin `DECA_INFERENCIA_URL`, el backend inventa resultados y se pueden mandar al paciente
+
+`inferenciaService.analizar` ahora devuelve un resultado **al azar** (`simular()`) cuando no hay
+URL configurada, en vez de un 503. Para probar la pantalla sirve. El problema es lo que pasa
+después:
+
+- `analisisController.realizar` lo guarda en `analisis` igual que uno real: porcentaje y banda
+  al azar.
+- El texto "Resultado simulado" viaja **sólo en la respuesta del `POST`**. No se guarda en la
+  base, así que los `GET` muestran un porcentaje y una banda sin ninguna marca de que son
+  inventados. Lo único que los delata es `modelo_sha = 'simulado'`, y nada lo muestra.
+- El médico puede **aprobarlo y enviarlo**, y el paciente recibe un resultado de Chagas
+  sorteado.
+
+Hoy `DECA_INFERENCIA_URL` no está configurada en Vercel, así que **esto le pasa a todo
+análisis que se cree en el despliegue actual**.
+
+**Arreglo propuesto**: que el simulador sólo corra si se lo pide explícitamente (por ejemplo
+`DECA_INFERENCIA_SIMULADA=1` en `.env` local, nunca en Vercel) y que, sin URL y sin esa
+variable, vuelva el 503 `inferencia_no_disponible` de antes. Si se quiere conservar en algún
+entorno compartido, `aprobar` y `enviar` deberían rechazar los análisis con
+`modelo_sha = 'simulado'`. Y conviene borrar de la base los análisis simulados que ya se hayan
+creado (`DELETE FROM analisis WHERE modelo_sha = 'simulado'`), sobre todo los que tengan
+`enviado = TRUE`.
+
+Detalle menor: el simulador reparte tres bandas (`alta` desde el percentil 90) y el modelo
+real devuelve dos, con `alta` desde el percentil ~98,5. La pantalla probada con el simulador
+muestra `alta` en el 10 % de los casos, siete veces más que con el modelo real, y nunca
+muestra `no_alta`, que es lo que va a ver casi todo el mundo. Si el simulador se queda,
+`bandaDe` debería devolver `percentil >= 98.5 ? 'alta' : 'no_alta'`, y el test de
+`inferenciaService` debería cubrir `no_alta`.
+
+### ✅ Está bien
+
+El flujo de aprobación (`aprobado`/`enviado`, `aprobar` → `enviar`, `rechazar` sólo si no está
+aprobado) encaja con lo que pide la validación clínica: el médico ve el resultado antes que el
+paciente. El guardado del ECG en Vercel Blob con acceso privado por defecto también está bien.
+
+---
+
 ## Revisión del 28/09 — cómo quedó `b847950`
 
 Revisé DECA-Back en `cda0f2f` y corrí `npm test` (235/235 pasan). Casi todo está bien, pero
@@ -510,7 +566,8 @@ curl -H "X-DECA-Token: $DECA_API_TOKEN" http://localhost:8000/contrato
 
 - **Dónde se hostea el servicio de inferencia.** Vercel no puede alcanzar una máquina detrás
   de un NAT, así que necesita una URL pública. Con CPU alcanza: ~500 ms por análisis, no
-  hace falta GPU.
+  hace falta GPU. Se va a correr en un servidor de la institución (`DESPLIEGUE.md` en DECA-AI);
+  falta definir con sistemas cómo se publica la URL.
 - **En qué formato exporta el equipo del hospital.** Por ahora el servicio lee CSV, JSON y
   WFDB. Agregar otro formato (SCP-ECG, DICOM, XML de GE o Philips) es media hora del lado
   de IA, pero hay que saber cuál es.

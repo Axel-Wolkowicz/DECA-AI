@@ -8,6 +8,8 @@ datasets/
 *.dat
 *.zip
 *.parquet
+# Secretos del despliegue (ver .env.ejemplo)
+.env
 # venv de IA (cuando se cree)
 .venv/
 venv/

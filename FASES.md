@@ -2752,6 +2752,54 @@ umbral en `plausibilidad.py` se actualizó con los números de val completo.
 
 ---
 
+## Sesión del 2026-10-01 — imagen Docker del servicio, y estado de DECA-Back
+
+**El servicio ya se puede desplegar.** `Dockerfile` + `.dockerignore` en la raíz:
+`python:3.13-slim`, torch **CPU** (sin los ~2 GB de CUDA), y del `requirements.txt` sólo lo que
+el servicio importa (numpy, scipy, pandas, wfdb). Los pins se leen con `grep` de los dos
+`requirements*.txt` en vez de repetirse, para que entrenamiento y servicio no puedan divergir
+de versión. Copia los 6 módulos del servicio más `mejor.pt` y `calibracion.json` (ya están en
+git, así que la imagen se construye sin el SSD). Escucha en `$PORT`, corre sin root, tiene
+healthcheck sobre `/salud`, y sin `DECA_API_TOKEN` responde 500: no se publica abierto por
+olvido.
+
+**Verificación sin Docker** (no está instalado en la laptop): se reprodujo la instalación de
+la imagen en un venv limpio (mismos 8 paquetes, `torch 2.13.0+cpu`) con el mismo layout de
+archivos, y se levantó con el `CMD` de la imagen. Sobre 6 registros de val y un ruido:
+**scores idénticos al entorno de entrenamiento (diferencia 0,0)**, mismas bandas y percentiles;
+el ruido da `no_parece_ecg`, y un CODE-15% de val da `derivaciones_permutadas` con R² = 1,0
+(del tipo de los 26 rotos de la sesión anterior); sin token, 401. Entre 85 y 190 ms por
+análisis. **El `docker build` en sí no se corrió**; el primer build en el host lo confirma.
+
+**Dónde se hostea — decisión de Axel: un servidor propio de la institución** (probablemente
+Linux). Como el backend está en Vercel, ese servidor tiene que ser alcanzable desde internet,
+y **cómo se logra queda abierto hasta hablar con sistemas**: (A) lo publica sistemas con
+dominio, TLS y proxy inverso, o (B) un túnel saliente de Cloudflare, sin abrir puertos de
+entrada. Quedaron preparadas las dos: `compose.yaml` (el servicio solo en `127.0.0.1`, y el
+túnel como perfil `tunel`), `.env.ejemplo`, `deploy/` (ejemplo de nginx y una unidad systemd
+para un servidor sin Docker) y `DESPLIEGUE.md` con los pasos, qué preguntarle a sistemas y
+cómo verificar. Medido con el venv mínimo: **~340 MB de RAM** con el modelo cargado y ~1 GB de
+dependencias. Ni `compose.yaml` ni la configuración de nginx se probaron (no hay Docker ni
+nginx en la laptop).
+
+**`src/verificar_servicio.py` — la verificación de un despliegue, reproducible.** Le manda a
+una URL cualquiera 3 ECG de validación con resultado conocido (2 `alta`, uno de CODE-15% y
+uno de SaMi-Trop, y 1 `no_alta`), el CODE-15% con derivaciones rotas y un ruido. Comprueba
+que coincidan score (tolerancia 1e-4), banda y percentil, que el sha256 sea el congelado y
+que sin token dé 401. Solo usa la biblioteca estándar, para correr en el servidor sin el
+venv. Los casos (`models/patrones-lr8/verificacion/`, ~1 MB) tienen la señal redondeada a 4
+decimales, y el esperado se calcula sobre el archivo redondeado: el redondeo movió el score
+1e-6, y la comparación queda exacta igual. Probado contra el venv mínimo: todo coincide con
+diferencia 0,0, y con token equivocado o servicio caído falla con el motivo y sale con 1.
+
+**DECA-Back en `d8225c5`** (revisado en `BACKEND-TAREAS.md`, sección del 01/10): los dos
+pendientes del 28/09 siguen (el `CHECK` de `banda` rechaza `no_alta`, falta `TEXTO_BANDA`), y
+apareció un simulador que, sin `DECA_INFERENCIA_URL`, **guarda resultados al azar como
+análisis reales, que el médico puede aprobar y enviar al paciente**. No se tocó el repo del
+backend: es de otra persona, como en las sesiones anteriores.
+
+---
+
 ## Fase 6 — Validación clínica y contrato con el resto de DECA 🔲
 
 **Tareas:**
