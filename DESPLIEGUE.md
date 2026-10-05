@@ -128,9 +128,8 @@ En Vercel, proyecto DECA-Back, variables de entorno de producción:
 | `DECA_INFERENCIA_URL` | la URL pública, sin `/` al final (p. ej. `https://inferencia-deca.ejemplo.edu.ar`) |
 | `DECA_API_TOKEN` | el mismo secreto que el `.env` del servidor |
 
-**Antes de configurarlas, DECA-Back tiene que corregir la columna `banda`**
-([BACKEND-TAREAS.md](BACKEND-TAREAS.md), revisión del 01/10). Si no, ~98,5 % de los análisis
-van a fallar con 500 en cuanto se conecte.
+DECA-Back ya está listo para recibirlas: la columna `banda` se corrigió en `4fcb3f3`
+([BACKEND-TAREAS.md](BACKEND-TAREAS.md), revisión del 05/10).
 
 ## Operación
 

@@ -2798,6 +2798,14 @@ apareció un simulador que, sin `DECA_INFERENCIA_URL`, **guarda resultados al az
 análisis reales, que el médico puede aprobar y enviar al paciente**. No se tocó el repo del
 backend: es de otra persona, como en las sesiones anteriores.
 
+**Actualización del 2026-10-05:** DECA-Back `4fcb3f3` corrigió la columna `banda` y agregó
+`TEXTO_BANDA` (296/296 tests). **El simulador es intencional** (aclaración de Axel): sirve
+para trabajar sin el servicio. Lo único que queda anotado es borrar los análisis con
+`modelo_sha = 'simulado'` antes de abrirlo a pacientes reales. Para trabajar contra el modelo
+real no hace falta mandar nada: DECA-AI es público, y la sección 10 de `BACKEND-TAREAS.md`
+explica cómo levantar el servicio en local, con Docker o con un venv sólo CPU, y usar los
+casos de `verificacion/` como ECG de prueba.
+
 ---
 
 ## Fase 6 — Validación clínica y contrato con el resto de DECA 🔲

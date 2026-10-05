@@ -13,6 +13,48 @@ hay que tocar.
 
 ---
 
+## Revisión del 05/10 — cómo quedó `4fcb3f3`
+
+Corrí `npm test`: **296/296 pasan**. Los dos pendientes del 28/09 están resueltos, y no
+queda nada que arreglar del lado del backend.
+
+### ✅ Resuelto: la columna `banda` acepta `no_alta`
+
+La migración está bien: es idempotente, funciona tanto si la columna ya existía como en una
+base nueva, y pasa las bandas viejas a `no_alta`. Hay un test con `no_alta` en el controller
+y otro en las rutas.
+
+### ✅ Resuelto: el texto de la banda
+
+`TEXTO_BANDA` está, con el texto de este documento, y sale en todos los endpoints que
+devuelven análisis (`POST`, los dos `GET`, `aprobar` y `enviar`). Hay test de que `no_alta`
+lleva la aclaración "NO descarta Chagas".
+
+### ✅ El simulador: queda, es a propósito
+
+La revisión del 01/10 lo marcaba como problema; Axel aclaró que es intencional, para poder
+trabajar sin el servicio levantado. El cambio a dos bandas (`alta` desde el percentil 98,6)
+deja la pantalla parecida a lo que va a devolver el modelo real.
+
+Una sola cosa para cuando haya pacientes reales: los análisis simulados quedan en la base como
+cualquier otro, y sólo se distinguen por `modelo_sha = 'simulado'`. Antes de abrirlo a
+pacientes, conviene borrarlos (`DELETE FROM analisis WHERE modelo_sha = 'simulado'`) y
+confirmar que `DECA_INFERENCIA_URL` esté cargada en Vercel. Si falta, el simulador vuelve a
+responder sin avisar.
+
+Una nota sobre el proceso: **`BACKEND-TAREAS2.md` es una copia de la versión del 28/09** de
+este documento. Conviene leer siempre este archivo en DECA-AI, que se actualiza en cada
+revisión.
+
+### Listo para conectar
+
+**El backend está listo para el servicio real**: en cuanto
+`DECA_INFERENCIA_URL` y `DECA_API_TOKEN` estén cargadas en Vercel, los análisis pasan por el
+modelo. El servicio todavía no tiene URL: va a correr en un servidor de la institución, y
+cómo se publica está pendiente de sistemas (`DESPLIEGUE.md` en DECA-AI).
+
+---
+
 ## Revisión del 01/10 — cómo quedó `d8225c5`
 
 Revisé los 5 commits posteriores a la revisión anterior. **Los dos pendientes del 28/09 siguen
@@ -29,7 +71,10 @@ este repo) y se va a publicar, y en cuanto `DECA_INFERENCIA_URL` apunte a algo, 
 
 Sin cambios respecto del 28/09: no está `TEXTO_BANDA` ([sección 5](#el-texto-de-la-banda-en-los-get)).
 
-### ❌ Nuevo: sin `DECA_INFERENCIA_URL`, el backend inventa resultados y se pueden mandar al paciente
+### ~~❌ Nuevo: sin `DECA_INFERENCIA_URL`, el backend inventa resultados y se pueden mandar al paciente~~
+
+> **Actualización del 05/10:** el simulador es intencional (ver la revisión del 05/10). Esta
+> sección queda como registro.
 
 `inferenciaService.analizar` ahora devuelve un resultado **al azar** (`simular()`) cuando no hay
 URL configurada, en vez de un 503. Para probar la pantalla sirve. El problema es lo que pasa
@@ -538,15 +583,44 @@ la advertencia ya escrita en `interpretacion.advertencia`, para no tener que inv
 **Sin el servicio andando** — mockeás `inferenciaService.analizar` en los tests, como en la
 sección 7. No hace falta Python para que `npm test` pase.
 
-**Con el servicio de verdad**, si tenés el repo de IA:
+**Con el simulador** — sin `DECA_INFERENCIA_URL`, `inferenciaService` devuelve un resultado
+al azar. Sirve para trabajar en las pantallas sin levantar nada más.
+
+**Con el modelo de verdad, en tu máquina.** El repo de IA es público y trae el modelo, así
+que no hace falta pedir nada:
 
 ```bash
-pip install -r requirements.txt -r requirements-api.txt
-DECA_API_SIN_AUTH=1 python src/servidor.py --puerto 8000
+git clone https://github.com/Axel-Wolkowicz/DECA-AI.git
+cd DECA-AI
 ```
 
-Con `DECA_API_SIN_AUTH=1` no pide token, sólo para desarrollo local. Después, desde el
-backend, `DECA_INFERENCIA_URL=http://localhost:8000`.
+Con Docker:
+
+```bash
+docker build -t deca-inferencia .
+docker run --rm -p 8000:8000 -e DECA_API_SIN_AUTH=1 deca-inferencia
+```
+
+Sin Docker, con Python 3.13. Instala sólo lo que usa el servicio, con torch para CPU, que
+pesa ~1 GB en vez de los ~3 GB de la versión con CUDA:
+
+```bash
+python -m venv .venv
+.venv/bin/pip install "$(grep -E '^torch==' requirements.txt)" --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install $(grep -E '^(numpy|scipy|pandas|wfdb)==' requirements.txt) -r requirements-api.txt
+DECA_API_SIN_AUTH=1 .venv/bin/python src/servidor.py --puerto 8000
+```
+
+(En Windows, `.venv\Scripts\` en lugar de `.venv/bin/`.)
+
+Con `DECA_API_SIN_AUTH=1` no pide token; es sólo para desarrollo local. Después, en el `.env`
+del backend, `DECA_INFERENCIA_URL=http://localhost:8000`. `DECA_API_TOKEN` puede quedar con
+cualquier valor: el servicio no lo mira.
+
+Para tener ECG de prueba con resultado conocido, en `models/patrones-lr8/verificacion/` del
+repo de IA hay cuatro JSON: dos dan `alta`, uno `no_alta` y uno lo rechaza el servicio (422,
+`derivaciones_permutadas`). Los resultados esperados están en `esperado.json`. Se suben como
+archivo, igual que un CSV.
 
 Para ver si está vivo y qué modelo tiene cargado:
 
