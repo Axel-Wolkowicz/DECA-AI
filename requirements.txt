@@ -18,3 +18,9 @@ jupyterlab
 # (ajustar cu126 a la version de CUDA del driver; sin GPU, pip install torch a secas).
 torch==2.13.0
 scikit-learn==1.9.0
+
+# Servicio de inferencia (src/servidor.py). Para servir el modelo no hace falta todo este
+# archivo: alcanza con torch (version CPU), numpy, scipy, pandas, wfdb y estas tres.
+fastapi==0.141.1
+uvicorn==0.53.0
+python-multipart==0.0.32

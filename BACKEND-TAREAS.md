@@ -51,7 +51,7 @@ revisión.
 **El backend está listo para el servicio real**: en cuanto
 `DECA_INFERENCIA_URL` y `DECA_API_TOKEN` estén cargadas en Vercel, los análisis pasan por el
 modelo. El servicio todavía no tiene URL: va a correr en un servidor de la institución, y
-cómo se publica está pendiente de sistemas (`DESPLIEGUE.md` en DECA-AI).
+el despliegue lo arma sistemas.
 
 ---
 
@@ -594,20 +594,13 @@ git clone https://github.com/Axel-Wolkowicz/DECA-AI.git
 cd DECA-AI
 ```
 
-Con Docker:
-
-```bash
-docker build -t deca-inferencia .
-docker run --rm -p 8000:8000 -e DECA_API_SIN_AUTH=1 deca-inferencia
-```
-
-Sin Docker, con Python 3.13. Instala sólo lo que usa el servicio, con torch para CPU, que
+Con Python 3.13. Instala sólo lo que usa el servicio, con torch para CPU, que
 pesa ~1 GB en vez de los ~3 GB de la versión con CUDA:
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install "$(grep -E '^torch==' requirements.txt)" --index-url https://download.pytorch.org/whl/cpu
-.venv/bin/pip install $(grep -E '^(numpy|scipy|pandas|wfdb)==' requirements.txt) -r requirements-api.txt
+.venv/bin/pip install $(grep -E '^(numpy|scipy|pandas|wfdb|fastapi|uvicorn|python-multipart)==' requirements.txt)
 DECA_API_SIN_AUTH=1 .venv/bin/python src/servidor.py --puerto 8000
 ```
 
@@ -640,8 +633,8 @@ curl -H "X-DECA-Token: $DECA_API_TOKEN" http://localhost:8000/contrato
 
 - **Dónde se hostea el servicio de inferencia.** Vercel no puede alcanzar una máquina detrás
   de un NAT, así que necesita una URL pública. Con CPU alcanza: ~500 ms por análisis, no
-  hace falta GPU. Se va a correr en un servidor de la institución (`DESPLIEGUE.md` en DECA-AI);
-  falta definir con sistemas cómo se publica la URL.
+  hace falta GPU. Se va a correr en un servidor de la institución,
+  en un solo contenedor que arma sistemas.
 - **En qué formato exporta el equipo del hospital.** Por ahora el servicio lee CSV, JSON y
   WFDB. Agregar otro formato (SCP-ECG, DICOM, XML de GE o Philips) es media hora del lado
   de IA, pero hay que saber cuál es.

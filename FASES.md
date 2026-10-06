@@ -2806,6 +2806,30 @@ real no hace falta mandar nada: DECA-AI es público, y la sección 10 de `BACKEN
 explica cómo levantar el servicio en local, con Docker o con un venv sólo CPU, y usar los
 casos de `verificacion/` como ECG de prueba.
 
+**Actualización del 2026-10-06:**
+- **Primera prueba de punta a punta, y anduvo.** El servicio corrió en la laptop de Axel, en
+  GPU, escuchando en la red local (`--host 0.0.0.0`, con token). El backend local del
+  compañero se conectó por `DECA_INFERENCIA_URL=http://<IP de la laptop>:8000`. En GPU los
+  scores difieren del esperado en hasta 2e-5, dentro de la tolerancia de 1e-4 de la
+  verificación; banda y percentil coinciden.
+- Encontrado en la prueba: un JSON trae su frecuencia adentro, y si el formulario manda además
+  otra distinta, el servicio responde 422 `frecuencia_en_conflicto`. Es a propósito.
+- **El despliegue lo arma otra persona, así que todo quedó en `deploy/`:** `Dockerfile` (con
+  `Dockerfile.dockerignore`), `compose.yaml`, `.env.ejemplo`, `DESPLIEGUE.md` y
+  `verificar_servicio.py`, que antes estaba en `src/`. Las rutas citadas arriba en esta
+  sesión son las de antes de moverlos. La imagen se sigue construyendo desde la raíz
+  (`docker build -f deploy/Dockerfile .`), porque necesita `src/` y `models/`.
+- **Más tarde el mismo día, `deploy/` se borró entero.** Sistemas pidió encargarse del
+  despliegue y que la IA sea **un solo contenedor**. Ya lo era: `servidor.py` carga el
+  modelo en el mismo proceso (`MotorDECA`); lo único que levantaba un segundo contenedor
+  era el túnel de Cloudflare de `compose.yaml`. Para el contenedor alcanza con instalar
+  `requirements.txt` (torch desde el índice CPU) y correr
+  `uvicorn servidor:app --host 0.0.0.0 --port 8000` desde `src/`, con `DECA_API_TOKEN`.
+  Con el borrado se perdió también `verificar_servicio.py`; los casos de
+  `models/patrones-lr8/verificacion/` y su `esperado.json` siguen y se pueden subir a mano.
+  Después se unificaron los requirements: `requirements-api.txt` pasó a una sección de
+  `requirements.txt` y se borró.
+
 ---
 
 ## Fase 6 — Validación clínica y contrato con el resto de DECA 🔲

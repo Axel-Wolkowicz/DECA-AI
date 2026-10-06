@@ -340,7 +340,7 @@ Están medidas, no son advertencias de forma.
 ## 9. Levantar el servicio
 
 ```bash
-pip install -r requirements.txt -r requirements-api.txt
+pip install -r requirements.txt
 export DECA_API_TOKEN=<secreto compartido con el backend>
 python src/servidor.py --host 0.0.0.0 --puerto 8000
 ```
