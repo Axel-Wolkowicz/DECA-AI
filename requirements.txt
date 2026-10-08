@@ -12,11 +12,13 @@ matplotlib==3.11.1
 jupyterlab
 
 # Modelado (Fase 4)
-# torch se instala desde el indice de PyTorch, no desde PyPI, porque la rueda de PyPI
-# viene sin CUDA. Para GPU NVIDIA:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu126
-# (ajustar cu126 a la version de CUDA del driver; sin GPU, pip install torch a secas).
-torch==2.13.0
+# torch va fijado a la version CPU porque el modelo ya no se entrena: solo se sirve, y
+# la inferencia corre en CPU. Ojo: la rueda de PyPI de torch en Linux SI trae CUDA
+# (varios GB de paquetes nvidia-*); solo en Windows viene sin CUDA. Por eso el indice CPU.
+# Para volver a entrenar en GPU NVIDIA, reinstalar torch aparte:
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu126
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
 scikit-learn==1.9.0
 
 # Servicio de inferencia (src/servidor.py). Para servir el modelo no hace falta todo este
