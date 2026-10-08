@@ -123,8 +123,10 @@ async def _manejar_ecg_invalido(request: Request, exc: ECGInvalido):
 
 # --------------------------------------------------------------------------------------
 @app.get("/salud")
+@app.get("/health")
 def salud():
-    """Sin autenticacion: la usa el orquestador para saber si el proceso vive."""
+    """Sin autenticacion: la usa el orquestador para saber si el proceso vive. `/health`
+    es el nombre que espera la infraestructura de TIC; es la misma respuesta."""
     if motor is None:
         return _respuesta_error(503, "modelo_no_cargado", "El modelo todavia no cargo.")
     return {
