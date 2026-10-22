@@ -2830,6 +2830,94 @@ casos de `verificacion/` como ECG de prueba.
   Después se unificaron los requirements: `requirements-api.txt` pasó a una sección de
   `requirements.txt` y se borró.
 
+## Sesión del 2026-10-22 — décima palanca: un transformer preentrenado (HuBERT-ECG)
+
+**Qué se propone y por qué va contra lo anterior.** La SÍNTESIS de Fase 5 da el proyecto por
+terminado como problema de ML: nueve palancas medidas, ninguna positiva, y un techo atribuido a
+la señal, no a la capacidad del modelo (el 82,7% de los perdidos no lleva ningún diagnóstico
+etiquetable). Esta sesión abre igual una décima: reemplazar la ResNet1D por un transformer
+fundacional preentrenado y ajustarlo. **Es decisión de Axel, tomada sabiendo eso.** La
+expectativa escrita antes de medir es de 0 a 3 puntos de TPR@5%, dentro del ruido.
+
+**Investigación.** Está en `investigacion-transformers.md` (la hizo un subagente; las cifras
+externas son de las fuentes que cita y no se re-verificaron una por una). Según el informe:
+recomendaba **ECG-FM** (wav2vec2, 90,9M parámetros, licencia MIT), por ser el único transformer
+con pesos públicos cuyo preentrenamiento no incluye CODE ni SaMi-Trop, y **ECGFounder** (CNN)
+como control. Descartaba HuBERT-ECG, ST-MEM, ECG-JEPA y xECG por contaminación: su
+preentrenamiento incluye CODE-15% o el CODE completo, que contiene nuestros registros de val y
+test. La evidencia externa es floja: en el Challenge 2025, ECG-FM congelado sacó 0,245 y
+descongelarlo empeoró, y su sonda lineal dio TPR@5% 0,377 contra el 39,9% de `patrones-lr8` en
+val (con splits distintos: no es comparación exacta).
+
+**Decisión de Axel — se usa HuBERT-ECG igual.** Considera suficientemente baja la probabilidad
+de que el modelo haya memorizado CODE como para que la contaminación invalide la medición. **Ese
+supuesto queda acá a propósito:** cualquier mejora que mida HuBERT sobre val o test está
+condicionada a él, y quien lea el número tiene que saberlo. Dos cosas más que quedan abiertas:
+- **Licencia CC BY-NC 4.0 (no comercial).** Para investigar no importa. Antes de que HuBERT
+  reemplace al checkpoint del servicio hay que confirmar que el uso de DECA entra en "no
+  comercial".
+- **Romper el checkpoint congelado.** `patrones-lr8/mejor.pt` sigue siendo el producto hasta
+  que algo lo supere en val con el criterio fijado de antemano.
+
+**Tamaño (pesos `model.safetensors` en Hugging Face, fp32):** small 122 MB (~30M parámetros),
+base 373 MB (~93M), large 755 MB (~189M). Los parámetros se infieren del tamaño del archivo
+(4 bytes cada uno), no están publicados. Con Adam, pesos + gradientes + estados ≈ 16 bytes por
+parámetro: 0,5 / 1,5 / 3 GB. Entran los tres en los 12 GB de la laptop; las activaciones no se
+midieron, y en el large pueden obligar a bajar el batch o usar precisión mixta.
+
+**Formato de entrada de HuBERT-ECG — verificado en el código, no en el paper** (medRxiv
+bloqueó la descarga). De `hubert_ecg/utils.py` y `hubert_ecg/dataset.py` del repo oficial:
+pasabanda FIR 0,05–47 Hz con fase cero (biosppy, `numtaps = int(0,3·fs)`, **+1 si es par**:
+121 a 400 Hz, no 120) → resampleo a 500 Hz por FFT → min-max a [-1, 1] por derivación sobre
+el registro entero → recorte de 5 s → las 12 derivaciones aplanadas en un vector de 30.000 →
+`decimate(·, 5)` sobre el vector aplanado → **(6000,)**, que el transformer ve como ~93 tokens.
+Diferencias con lo nuestro: 5 s y no 7, min-max y no z-score, y el `decimate` aplanado hace que
+el filtro antialiasing cruce el borde entre derivaciones (rareza del original que se replica,
+porque es lo que vio el modelo). **El orden de derivaciones no está en el código**; se asume el
+estándar, que es el nuestro, sin confirmar.
+
+**`hubert/entrada.py` — se adapta desde Fase 2, sin volver al crudo.** Funciona porque el
+min-max no cambia ante un reescalado lineal positivo y el pasabanda elimina la constante: el
+z-score de Fase 2 desaparece. Sólo numpy y scipy, como `src/ventana.py`, para que el servicio
+pueda usarlo. El filtro se reimplementó con scipy en vez de sumar biosppy a `requirements.txt`.
+El recorte de 5 s va centrado dentro de los 7 s. Todo el trabajo de HuBERT vive en `hubert/`
+(pedido de Axel): `src/` no se tocó.
+
+**`hubert/validar_entrada.py` — verificación contra el código original**, ejecutado tal cual
+(las funciones se extraen de `utils.py` con `ast`; `filter_signal` se carga de biosppy), sobre
+registros crudos de PTB-XL bajados de PhysioNet. Medido sobre 6 registros:
+
+| | peor registro | mediana |
+|---|---|---|
+| (a) implementación, misma ventana de 7 s: diferencia máxima | 4,8e-8 | 3,0e-8 |
+| (b) fidelidad, crudo de 10 s vs Fase 2 + adaptador: correlación mínima entre derivaciones | 0,9994 | 0,9998 |
+| (b) diferencia máxima (escala [-1, 1]) | 0,49 | 0,31 |
+| (b) diferencia media | 0,13 | 0,05 |
+
+**(a) La implementación es exacta** (redondeo de float32). **(b) La forma de onda es la misma
+y la amplitud no.** Ajustando por derivación un factor y un corrimiento, el factor sale entre
+0,76 y 1,00: el min-max sobre 7 s en vez de 10 s deja la señal hasta ~30% más grande, porque
+los 10 s suelen tener picos más extremos que comprimen el resto. Después del ajuste queda un
+residuo de hasta 0,17, cuyo origen (efectos de borde del filtro, línea de base) no se
+verificó. No se puede corregir desde Fase 2: esos 3 s ya se descartaron.
+
+**Trabas de entorno encontradas.** En la red de la oficina, `requests` (y por lo tanto
+`wfdb.dl_database`) falla la validación SSL por un certificado del proxy, y curl de Windows
+necesita `--ssl-no-revoke` (desactiva sólo el chequeo de revocación). El script no descarga
+nada: si faltan archivos imprime el comando. Además, `C:\Users\50321522\DECA-datasets` es una
+copia local con sólo Fase 2 (sin crudos ni `metadata.parquet`) y **gana la autodetección de
+`config.py`**: con el SSD enchufado hay que setear `DECA_DATA_DIR` a mano.
+
+**Plan, en dos pasos con un gate:**
+1. **Sin SSD.** Antes de correr, Axel fija el umbral de éxito (el informe sugiere ≥ +3 puntos
+   de TPR@5% en val arena A a nivel paciente, media de 2 semillas, con IC bootstrap que excluya
+   0). Después: `hubert-ecg-base` congelado → embeddings de train y val con `entrada.py` →
+   sonda lineal → TPR@5% en val arena A, separando positivos con y sin BRD anotado. Lo que
+   importa es si encuentra positivos sin BRD.
+2. **Con SSD, sólo si la sonda pasa.** Armar la entrada desde el crudo de 10 s, con el split
+   congelado y los mismos descartes que Fase 2, para eliminar la diferencia de escala. Recién
+   ahí el ajuste completo, con 2 semillas.
+
 ---
 
 ## Fase 6 — Validación clínica y contrato con el resto de DECA 🔲
